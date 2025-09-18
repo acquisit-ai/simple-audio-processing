@@ -98,7 +98,29 @@ def run_whisperx_with_local_file(local_audio_path, output_path=None):
     print(f"\n输出文件: {output_json_path}")
     print(f"  ✓ 目录已创建/确认")
 
+    # 保存结果到文件
+    save_whisper_result(output, output_json_path)
+
     return output, output_json_path
+
+
+def save_whisper_result(result, output_json_path):
+    """
+    保存Whisper结果到JSON文件
+
+    Args:
+        result: Whisper API返回的结果
+        output_json_path: 输出文件路径
+    """
+    # 创建输出目录
+    output_dir = os.path.dirname(output_json_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 保存结果为JSON文件
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    print(f"✓ JSON 文件已保存: {output_json_path}")
 
 
 def main():
@@ -107,14 +129,7 @@ def main():
     output_path = "1transcript-raw/3min1.json"
 
     try:
-        result, output_json_path = run_whisperx_with_local_file(audio_path, output_path)
-
-        # 将结果保存为 JSON 文件
-        print(f"\n正在保存结果...")
-        with open(output_json_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-
-        print(f"  ✓ JSON 文件已保存: {output_json_path}")
+        result, _ = run_whisperx_with_local_file(audio_path, output_path)
 
         # 显示结果摘要
         print(f"\n结果摘要:")

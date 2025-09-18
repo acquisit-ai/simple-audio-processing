@@ -183,6 +183,21 @@ def process_sentences_with_llm(sentences_data: dict, output_path: str = None, ba
         output_path = "3llm/3min1-cleaned-gemini.json"
 
     # 保存分析后的数据
+    save_llm_result(final_result, output_path, all_analyzed_sentences, total_time, batch_times, total_batches)
+
+
+def save_llm_result(final_result: dict, output_path: str, all_analyzed_sentences: list, total_time: float, batch_times: list, total_batches: int) -> None:
+    """
+    保存LLM分析结果到JSON文件
+
+    Args:
+        final_result: 最终结果字典
+        output_path: 输出文件路径
+        all_analyzed_sentences: 所有分析后的句子
+        total_time: 总处理时间
+        batch_times: 各批次用时列表
+        total_batches: 总批次数
+    """
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -199,6 +214,7 @@ def process_sentences_with_llm(sentences_data: dict, output_path: str = None, ba
     print(f"  总处理时间: {total_time:.2f}秒")
     print(f"  平均批次时间: {avg_batch_time:.2f}秒")
     print(f"  处理批次数: {total_batches}")
+
 
 def extract_sentences_only(input_path: str) -> dict:
     """

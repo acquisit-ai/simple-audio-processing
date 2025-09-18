@@ -51,10 +51,7 @@ def main(audio_file="./原始媒体/3min1.mp3"):
         # 步骤1: Whisper语音识别
         print("\n步骤1: 使用 Whisper 进行语音识别...")
         print("-" * 50)
-        _, output_json_path = whisper_module.run_whisperx_with_local_file(audio_file, whisper_output)
-
-        # run_whisperx_with_local_file 函数已经自动保存了结果
-        print(f"✓ Whisper 输出已保存: {output_json_path}")
+        whisper_module.run_whisperx_with_local_file(audio_file, whisper_output)
 
         # 步骤2: 数据清理
         print("\n步骤2: 清理和结构化数据...")
