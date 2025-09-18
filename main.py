@@ -3,7 +3,7 @@
 """
 主要流水线脚本
 按顺序调用 1whisper.py, 2data-cleansing.py, 3llm.py, add_paragraph_layer.py 中的函数
-从原始媒体/3min1.mp3 最终得到 4final/3min1-cleaned-gemini-final.json
+从original-media/3min1.mp3 最终得到 4final/3min1-cleaned-gemini-final.json
 """
 
 import os
@@ -26,7 +26,7 @@ data_cleansing_module = import_module_by_path("2data-cleansing.py", "data_cleans
 llm_module = import_module_by_path("3llm.py", "llm_module")
 add_paragraph_module = import_module_by_path("4add_paragraph_layer.py", "add_paragraph_module")
 
-def main(audio_file="./原始媒体/3min1.mp3"):
+def main(audio_file="./original-media/3min1.mp3"):
     """
     执行完整的音频转录和分析流水线
 
@@ -107,6 +107,6 @@ def main(audio_file="./原始媒体/3min1.mp3"):
 
 if __name__ == "__main__":
     # 定义音频文件路径
-    audio_file = "原始媒体/Most racist countries in Europe.mp3"
+    audio_file = "original-media/Most racist countries in Europe.mp3"
 
     main(audio_file)

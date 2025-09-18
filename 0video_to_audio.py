@@ -141,8 +141,8 @@ if __name__ == "__main__":
     # 示例用法：直接调用函数
 
     # 单文件转换示例
-    video_path = "./原始媒体/Most racist countries in Europe.mp4"
-    output_path = "./原始媒体/Most racist countries in Europe.mp3"
+    video_path = "./original-media/Most racist countries in Europe.mp4"
+    output_path = "./original-media/Most racist countries in Europe.mp3"
     start = 0  # 开始时间（秒），None表示从头开始
     end = 180  # 结束时间（秒），None表示到结尾
 
@@ -153,6 +153,6 @@ if __name__ == "__main__":
 
     # 批量转换示例（注释掉，需要时取消注释）
     # try:
-    #     batch_convert_videos("./原始媒体/", "./audios/", "mp3", 0, 60)
+    #     batch_convert_videos("./original-media/", "./audios/", "mp3", 0, 60)
     # except Exception as e:
     #     print(f"批量转换失败: {e}")

@@ -125,7 +125,7 @@ def save_whisper_result(result, output_json_path):
 
 def main():
     # 直接使用固定的音频文件路径
-    audio_path = "./原始媒体/3min1.mp3"
+    audio_path = "./original-media/3min1.mp3"
     output_path = "1transcript-raw/3min1.json"
 
     try:

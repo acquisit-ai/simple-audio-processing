@@ -41,7 +41,7 @@
 ### 输出目录结构
 
 ```
-├── 原始媒体/                  # 音频文件存放目录
+├── original-media/              # 音频文件存放目录
 ├── 1transcript-raw/          # Whisper 原始转录结果
 ├── 2cleaned-data/            # 清理后的结构化数据
 ├── 3llm/                     # LLM 分析结果
@@ -105,7 +105,7 @@ REPLICATE_API_TOKEN=your_replicate_token_here
 
 ### 5. 准备音频文件
 
-将要处理的音频文件放入 `原始媒体/` 目录中。支持的格式：
+将要处理的音频文件放入 `original-media/` 目录中。支持的格式：
 
 - MP3, MP4, WAV, AVI, MOV 等
 
@@ -113,7 +113,7 @@ REPLICATE_API_TOKEN=your_replicate_token_here
 
 ### 快速开始
 
-1. 将音频文件放入 `原始媒体/` 目录
+1. 将音频文件放入 `original-media/` 目录
 2. 运行主流水线：
 
 ```bash
@@ -131,7 +131,7 @@ main.py 现在支持参数化，你可以通过以下方式使用：
 ```python
 if __name__ == "__main__":
     # 定义音频文件路径
-    audio_file = "./原始媒体/your_audio_file.mp3"
+    audio_file = "./original-media/your_audio_file.mp3"
     main(audio_file)
 ```
 
@@ -151,7 +151,7 @@ main("./path/to/your/audio.mp3")
 
 系统会基于音频文件名自动生成所有输出路径：
 
-- 输入: `./原始媒体/example.mp3`
+- 输入: `./original-media/example.mp3`
 - Whisper 输出: `1transcript-raw/example.json`
 - 清理数据: `2cleaned-data/example-cleaned.json`
 - LLM 分析: `3llm/example-cleaned-gemini.json`
@@ -189,8 +189,8 @@ batch_convert_videos("./videos/", "./audios/", "mp3", 5, 30)
 ```python
 if __name__ == "__main__":
     # 修改这些参数
-    video_path = "./原始媒体/your_video.mp4"
-    output_path = "./原始媒体/your_audio.mp3"
+    video_path = "./original-media/your_video.mp4"
+    output_path = "./original-media/your_audio.mp3"
     start = 0      # 开始时间（秒），None表示从头开始
     end = 180      # 结束时间（秒），None表示到结尾
 
