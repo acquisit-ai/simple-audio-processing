@@ -1,0 +1,98 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Audio/Video files (large media files)
+*.mp3
+*.mp4
+*.wav
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+*.m4a
+*.aac
+*.ogg
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# API keys and sensitive data
+.env
+.env.local
+.env.*.local
+config.ini
+secrets.json
+*.key
+*.pem
+
+# Claude Code settings
+.claude/
+
+# Output directories (generated content)
+1transcript-raw/
+2cleaned-data/
+3llm/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
