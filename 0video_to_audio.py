@@ -147,7 +147,7 @@ if __name__ == "__main__":
     end = 180  # 结束时间（秒），None表示到结尾
 
     try:
-        convert_video_to_audio(video_path, output_path, "mp3", start, end)
+        convert_video_to_audio(video_path, output_path)
     except Exception as e:
         print(f"转换失败: {e}")
 
