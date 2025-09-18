@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import List, TypedDict, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # 导入gemini.py中的分析函数
 sys.path.append(str(Path(__file__).parent))
@@ -37,18 +38,23 @@ class Sentence(TypedDict):
 class Paragraph(TypedDict):
     sentences: List[Sentence]  # 句子列表
 
-def analyze_batch_wrapper(batch_info: Tuple[int, List[dict]]) -> Tuple[int, List[dict], float]:
+def analyze_batch_wrapper(batch_info: Tuple[int, List[dict]], stop_event: threading.Event) -> Tuple[int, List[dict], float]:
     """
     批次分析包装函数，调用Gemini API分析一批句子。
 
     参数:
         batch_info: (批次索引, 句子列表) 的元组
+        stop_event: 用于停止处理的事件
 
     返回:
         (批次索引, 分析结果列表, 批次用时) 的元组
     """
     batch_idx, batch = batch_info
     batch_num = batch_idx + 1
+
+    # 检查是否已经被请求停止
+    if stop_event.is_set():
+        return (batch_idx, [], 0.0)
 
     start_time = time.time()
     print(f"  开始处理批次 {batch_num} (句子 {batch[0]['index']+1}-{batch[-1]['index']+1})")
@@ -57,6 +63,10 @@ def analyze_batch_wrapper(batch_info: Tuple[int, List[dict]]) -> Tuple[int, List
     batch_json = json.dumps(batch, ensure_ascii=False, indent=2)
 
     try:
+        # 再次检查停止事件
+        if stop_event.is_set():
+            return (batch_idx, [], 0.0)
+
         # 调用gemini.py中的分析函数
         result = analyze_english_text_to_sentences(batch_json)
 
@@ -70,11 +80,15 @@ def analyze_batch_wrapper(batch_info: Tuple[int, List[dict]]) -> Tuple[int, List
             return (batch_idx, analyzed, batch_time)
         else:
             print(f"  ✗ 批次 {batch_num} 失败 (用时: {batch_time:.2f}秒)")
+            # 设置停止事件，立即终止其他线程
+            stop_event.set()
             return (batch_idx, [], batch_time)
     except Exception as e:
         end_time = time.time()
         batch_time = end_time - start_time
         print(f"  ✗ 批次 {batch_num} 错误: {e} (用时: {batch_time:.2f}秒)")
+        # 设置停止事件，立即终止其他线程
+        stop_event.set()
         return (batch_idx, [], batch_time)
 
 def process_sentences_with_llm(sentences_data: dict, output_path: str = None, batch_size: int = DEFAULT_BATCH_SIZE, max_workers: int = DEFAULT_MAX_WORKERS) -> None:
@@ -105,13 +119,16 @@ def process_sentences_with_llm(sentences_data: dict, output_path: str = None, ba
     # 开始总体计时
     total_start_time = time.time()
 
+    # 创建停止事件
+    stop_event = threading.Event()
+
     # 并行处理批次
     results_dict = {}
     batch_times = []
 
     with ThreadPoolExecutor(max_workers=min(max_workers, total_batches)) as executor:
         # 提交所有批次处理任务
-        futures = {executor.submit(analyze_batch_wrapper, batch): batch[0] for batch in batches}
+        futures = {executor.submit(analyze_batch_wrapper, batch, stop_event): batch[0] for batch in batches}
 
         # 收集完成的结果
         completed = 0
@@ -121,6 +138,14 @@ def process_sentences_with_llm(sentences_data: dict, output_path: str = None, ba
             batch_times.append(batch_time)
             completed += 1
             print(f"进度: {completed}/{total_batches} 批次已完成")
+
+            # 如果有批次失败，立即取消所有未完成的任务
+            if len(analyzed) == 0 and batch_time > 0:  # 失败但不是被停止事件取消的
+                print(f"\n⚠️  检测到批次失败，正在取消剩余任务...")
+                # 取消所有未完成的futures
+                for f in futures:
+                    f.cancel()
+                break
 
     # 检查是否有批次失败
     failed_batches = []

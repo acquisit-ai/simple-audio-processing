@@ -40,7 +40,7 @@ def analyze_english_text_to_sentences(text_to_analyze: str) -> types.GenerateCon
         prompt = f"""
         请将以下英文文本进行结构化分析。请严格遵循以下指示：
         1.  为每个句子提供一个整体的中文翻译或解释（explanation）。
-        2.  将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，也可以是短语固定搭配，类似by the way/at the same time/deal with。
+        2.  将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，对于简单常用的单词，也可分为短语固定搭配，类似by the way/at the same time/deal with。
         3.  为每个分片（token）提供详细的中文解释（explanation）。
         4.  对于简单介词或者连词，比如if, the, but, or, a, and等，可以中文解释（explanation）为空。
         5.  任何标点符号都应被视为一个独立的分片（token），中文解释（explanation）为空。
