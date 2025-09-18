@@ -14,6 +14,7 @@
 - 🤖 **AI 文本分析**: 使用 Gemini API 进行句子分析和词汇解释
 - 📊 **Token 统计**: 自动统计每个句子和整体的 token 数量
 - 🔢 **索引管理**: 统一管理句子和 token 索引，确保从0开始的连续编号
+- ⏰ **时间信息保留**: 自动保留原始音频的时间戳信息（start/end时间）
 - 🔄 **并行处理**: 支持批量并行处理提高效率
 - 🔐 **安全配置**: API 密钥通过环境变量管理
 - 📊 **完整流水线**: 从音频文件到结构化分析结果的一站式处理
@@ -274,6 +275,7 @@ graph LR
    - 语法结构分析
    - 自动统计每句子和总体的 token 数量
    - 统一管理所有索引编号（从0开始）
+   - 自动添加时间戳信息（start/end时间）到分析结果
 
 ## 输出格式
 
@@ -289,6 +291,8 @@ graph LR
       "index": 0,
       "text": "Number one most racist country in Europe...",
       "explanation": "欧洲最种族主义的国家排名第一...",
+      "start": 0.109,
+      "end": 8.558,
       "total_tokens": 13,
       "tokens": [
         {
@@ -312,6 +316,8 @@ graph LR
 - `total_sentences`: 总句子数
 - `total_tokens`: 所有句子的 token 总数
 - `sentences[].index`: 句子在整个文本中的编号（从0开始）
+- `sentences[].start`: 句子在音频中的开始时间（秒）
+- `sentences[].end`: 句子在音频中的结束时间（秒）
 - `sentences[].total_tokens`: 当前句子的 token 数量
 - `sentences[].tokens[].index`: token 在当前句子中的编号（从0开始）
 
@@ -329,6 +335,7 @@ graph LR
 - 负责 token 数量统计（单句和总体）
 - 处理批次分组和并行执行
 - 数据整合和最终输出格式化
+- 根据索引自动添加时间戳信息（start/end时间）
 
 这种设计确保了职责清晰，gemini.py 专注于 AI 分析，3llm.py 负责数据组织。
 

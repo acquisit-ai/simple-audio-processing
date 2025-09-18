@@ -65,11 +65,11 @@ def main(audio_file="./原始媒体/3min1.mp3"):
 
         # 3a: 提取句子
         print("3a: 提取句子...")
-        simplified_data = llm_module.extract_sentences_only(cleaned_output)
+        simplified_data, original_data = llm_module.extract_sentences_only(cleaned_output)
 
         # 3b: LLM处理
         print("\n3b: 使用 Gemini API 处理...")
-        llm_module.process_sentences_with_llm(simplified_data, final_output)
+        llm_module.process_sentences_with_llm(simplified_data, original_data, final_output)
 
         print("\n" + "=" * 80)
         print("✅ 流水线执行完成!")
@@ -98,6 +98,6 @@ def main(audio_file="./原始媒体/3min1.mp3"):
 
 if __name__ == "__main__":
     # 定义音频文件路径
-    audio_file = "原始媒体/3min1.mp3"
+    audio_file = "原始媒体/3min2.mp3"
 
     main(audio_file)
