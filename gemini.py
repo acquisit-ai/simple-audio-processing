@@ -17,12 +17,10 @@ if not API_KEY:
 # Define Pydantic data structures
 
 class SubtitleToken(BaseModel):
-    index: int = Field(description="token 在句子中的顺序")
     text: str = Field(description="token 的文本内容")
     explanation: str = Field(description="对该 token 的中文解释/注释")
 
 class Sentence(BaseModel):
-    index: int = Field(description="句子在整个文本中的编号")
     text: str = Field(description="句子的完整英文原文")
     explanation: Optional[str] = Field(description="对整个句子的中文解释", default=None)
     tokens: List[SubtitleToken] = Field(description="构成该句子的 token 列表")
@@ -39,8 +37,8 @@ def analyze_english_text_to_sentences(text_to_analyze: str) -> types.GenerateCon
 
         prompt = f"""
         请将以下英文文本进行结构化分析。请严格遵循以下指示：
-        1.  为每个句子提供一个整体的中文翻译或解释（explanation）。
-        2.  将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，对于简单常用的单词，也可分为短语固定搭配，类似by the way/at the same time/deal with。
+        1.  按顺序为每个句子提供一个整体的中文翻译或解释（explanation）。
+        2.  按顺序将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，对于简单常用的单词，也可分为短语固定搭配，类似by the way/at the same time/deal with。
         3.  为每个分片（token）提供详细的中文解释（explanation）。
         4.  对于超简单，最常用单词，比如if, is, are, the, but, or, a, and等，允许中文解释（explanation）为空。
         5.  任何标点符号都应被视为一个独立的分片（token），中文解释（explanation）为空。
@@ -101,12 +99,12 @@ if __name__ == "__main__":
         parsed_result: AnalysisResult = api_response.parsed
         if parsed_result and parsed_result.sentences:
             sentence_list = parsed_result.sentences
-            for sentence in sentence_list:
-                print(f"\n句子 {sentence.index}: \"{sentence.text}\"")
+            for i, sentence in enumerate(sentence_list):
+                print(f"\n句子 {i}: \"{sentence.text}\"")
                 print(f"  句子解释: {sentence.explanation}")
                 print("  Tokens 详解:")
-                for token in sentence.tokens:
-                    print(f"    - {token.index}. '{token.text}': {token.explanation}")
+                for j, token in enumerate(sentence.tokens):
+                    print(f"    - {j}. '{token.text}': {token.explanation}")
         else:
             print("未能成功解析响应或响应中不包含句子。")
             print("原始响应内容:", api_response.text)

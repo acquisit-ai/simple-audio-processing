@@ -74,8 +74,16 @@ def analyze_batch_wrapper(batch_info: Tuple[int, List[dict]], stop_event: thread
         batch_time = end_time - start_time
 
         if result and result.parsed and result.parsed.sentences:
-            # 将Pydantic模型转换为字典
-            analyzed = [sentence.model_dump() for sentence in result.parsed.sentences]
+            # 将Pydantic模型转换为字典并添加索引
+            analyzed = []
+            for sentence_idx, sentence in enumerate(result.parsed.sentences):
+                sentence_dict = sentence.model_dump()
+                # 添加句子索引（基于原始batch中的索引）
+                sentence_dict['index'] = batch[sentence_idx]['index']
+                # 为tokens添加索引
+                for token_idx, token in enumerate(sentence_dict['tokens']):
+                    token['index'] = token_idx
+                analyzed.append(sentence_dict)
             print(f"  ✓ 批次 {batch_num} 完成: {len(analyzed)} 个句子 (用时: {batch_time:.2f}秒)")
             return (batch_idx, analyzed, batch_time)
         else:
@@ -171,10 +179,19 @@ def process_sentences_with_llm(sentences_data: dict, output_path: str = None, ba
 
     print(f"\n按正确顺序合并结果...")
 
+    # 计算每个句子的token数量并统计总数
+    total_tokens = 0
+    for sentence in all_analyzed_sentences:
+        # 计算当前句子的token数量
+        sentence_tokens = len(sentence.get('tokens', []))
+        sentence['total_tokens'] = sentence_tokens
+        total_tokens += sentence_tokens
+
     # 创建最终结果结构
     final_result = {
         "language": "en",
         "total_sentences": len(all_analyzed_sentences),
+        "total_tokens": total_tokens,
         "sentences": all_analyzed_sentences
     }
 
