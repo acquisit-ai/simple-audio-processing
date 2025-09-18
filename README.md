@@ -16,6 +16,7 @@
 ```
 .
 ├── main.py                    # 主流水线脚本
+├── 0video_to_audio.py         # 视频转音频工具
 ├── 1whisper.py               # Whisper 语音识别模块
 ├── 2data-cleansing.py        # 数据清理模块
 ├── 3llm.py                   # LLM 分析模块
@@ -63,7 +64,7 @@ pip install -r requirements.txt
 或者手动安装：
 
 ```bash
-pip install replicate>=0.15.0 google-genai>=0.6.0 python-dotenv>=1.0.0 pydantic>=2.0.0
+pip install replicate>=0.15.0 google-genai>=0.6.0 python-dotenv>=1.0.0 pydantic>=2.0.0 moviepy>=1.0.3
 ```
 
 #### 依赖说明
@@ -72,6 +73,7 @@ pip install replicate>=0.15.0 google-genai>=0.6.0 python-dotenv>=1.0.0 pydantic>
 - **google-genai**: Google Gemini API 客户端，用于文本分析
 - **python-dotenv**: 环境变量管理，用于安全存储 API 密钥
 - **pydantic**: 数据验证和序列化，用于结构化 API 响应
+- **moviepy**: 视频处理库，用于视频转音频功能
 
 ### 4. 配置 API 密钥
 
@@ -142,6 +144,64 @@ main("./path/to/your/audio.mp3")
 - Whisper输出: `1transcript-raw/example.json`
 - 清理数据: `2cleaned-data/example-cleaned.json`
 - 最终结果: `3llm/example-cleaned-gemini.json`
+
+### 视频转音频工具
+
+项目包含独立的视频转音频工具 `0video_to_audio.py`：
+
+#### 函数调用方式
+
+```python
+from 0video_to_audio import convert_video_to_audio, batch_convert_videos
+
+# 单文件转换 - 完整转换
+convert_video_to_audio("video.mp4")
+
+# 单文件转换 - 指定输出文件
+convert_video_to_audio("video.mp4", "audio.mp3")
+
+# 单文件转换 - 裁剪（从10秒到60秒）
+convert_video_to_audio("video.mp4", "audio.mp3", "mp3", 10, 60)
+
+# 批量转换
+batch_convert_videos("./videos/", "./audios/")
+
+# 批量裁剪转换（所有视频裁剪5-30秒）
+batch_convert_videos("./videos/", "./audios/", "mp3", 5, 30)
+```
+
+#### 直接运行脚本
+
+修改 `0video_to_audio.py` 文件末尾的参数：
+
+```python
+if __name__ == "__main__":
+    # 修改这些参数
+    video_path = "./原始媒体/your_video.mp4"
+    output_path = "./原始媒体/your_audio.mp3"
+    start = 0      # 开始时间（秒），None表示从头开始
+    end = 180      # 结束时间（秒），None表示到结尾
+
+    convert_video_to_audio(video_path, output_path, "mp3", start, end)
+```
+
+然后运行：
+```bash
+python 0video_to_audio.py
+```
+
+#### 函数参数说明
+
+- `video_path`: 输入视频文件路径
+- `output_path` (可选): 输出音频文件路径，不指定则自动生成
+- `audio_format`: 输出音频格式，默认 "mp3"
+- `start` (可选): 开始时间（秒），None 表示从头开始
+- `end` (可选): 结束时间（秒），None 表示到结尾
+
+#### 支持格式
+
+- **输入视频**: MP4, AVI, MOV, MKV, FLV, WMV, M4V, WEBM
+- **输出音频**: MP3（默认）
 
 ### 分步执行
 

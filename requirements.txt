@@ -8,6 +8,9 @@ python-dotenv>=1.0.0
 # Data validation and processing
 pydantic>=2.0.0
 
+# Video processing
+moviepy>=1.0.3
+
 # Standard libraries included with Python:
 # - json (built-in)
 # - os (built-in)
