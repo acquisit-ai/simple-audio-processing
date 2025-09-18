@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 主要流水线脚本
-按顺序调用 1whisper.py, 2data-cleansing.py, 3llm.py 中的函数
-从原始媒体/3min1.mp3 最终得到 3llm/3min1-cleaned-gemini.json
+按顺序调用 1whisper.py, 2data-cleansing.py, 3llm.py, add_paragraph_layer.py 中的函数
+从原始媒体/3min1.mp3 最终得到 4final/3min1-cleaned-gemini-final.json
 """
 
 import os
@@ -24,6 +24,7 @@ def import_module_by_path(module_path, module_name):
 whisper_module = import_module_by_path("1whisper.py", "whisper_module")
 data_cleansing_module = import_module_by_path("2data-cleansing.py", "data_cleansing_module")
 llm_module = import_module_by_path("3llm.py", "llm_module")
+add_paragraph_module = import_module_by_path("4add_paragraph_layer.py", "add_paragraph_module")
 
 def main(audio_file="./原始媒体/3min1.mp3"):
     """
@@ -40,7 +41,8 @@ def main(audio_file="./原始媒体/3min1.mp3"):
     audio_filename = Path(audio_file).stem
     whisper_output = f"1transcript-raw/{audio_filename}.json"
     cleaned_output = f"2cleaned-data/{audio_filename}-cleaned.json"
-    final_output = f"3llm/{audio_filename}-cleaned-gemini.json"
+    llm_output = f"3llm/{audio_filename}-cleaned-gemini.json"
+    final_output = f"4final/{audio_filename}-cleaned-gemini-final.json"
 
     # 检查输入文件是否存在
     if not os.path.exists(audio_file):
@@ -69,7 +71,12 @@ def main(audio_file="./原始媒体/3min1.mp3"):
 
         # 3b: LLM处理
         print("\n3b: 使用 Gemini API 处理...")
-        llm_module.process_sentences_with_llm(simplified_data, original_data, final_output)
+        llm_module.process_sentences_with_llm(simplified_data, original_data, llm_output)
+
+        # 步骤4: 添加Paragraph层
+        print("\n步骤4: 添加 Paragraph 层结构...")
+        print("-" * 50)
+        add_paragraph_module.add_paragraph_layer(llm_output, final_output)
 
         print("\n" + "=" * 80)
         print("✅ 流水线执行完成!")
@@ -84,6 +91,8 @@ def main(audio_file="./原始媒体/3min1.mp3"):
         print(f"  ↓ (数据清理)")
         print(f"  {cleaned_output}")
         print(f"  ↓ (LLM分析)")
+        print(f"  {llm_output}")
+        print(f"  ↓ (添加Paragraph层)")
         print(f"  {final_output}")
 
     except Exception as e:
@@ -98,6 +107,6 @@ def main(audio_file="./原始媒体/3min1.mp3"):
 
 if __name__ == "__main__":
     # 定义音频文件路径
-    audio_file = "原始媒体/3min2.mp3"
+    audio_file = "原始媒体/Most racist countries in Europe.mp3"
 
     main(audio_file)

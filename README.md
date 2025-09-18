@@ -1,6 +1,6 @@
 # Simple Audio Processing Pipeline
 
-一个完整的音频处理流水线，用于将音频文件转录为文本并进行智能分析。该项目使用 Whisper 进行语音识别，然后通过 Gemini API 对转录内容进行深度分析和词汇解释。
+一个完整的音频处理流水线，用于将音频文件转录为文本并进行智能分析。该项目使用 Whisper 进行语音识别，通过 Gemini API 对转录内容进行深度分析和词汇解释，并添加段落结构化组织。
 
 ⏱️ gemini 时间统计:
 总处理时间: 189.58 秒
@@ -14,6 +14,7 @@
 - 🤖 **AI 文本分析**: 使用 Gemini API 进行句子分析和词汇解释
 - 📊 **Token 统计**: 自动统计每个句子和整体的 token 数量
 - 🔢 **索引管理**: 统一管理句子和 token 索引，确保从0开始的连续编号
+- 📑 **段落结构**: 支持将句子组织成段落，为更复杂的文档结构做准备
 - ⏰ **时间信息保留**: 自动保留原始音频的时间戳信息（start/end时间）
 - 🔄 **并行处理**: 支持批量并行处理提高效率
 - 🔐 **安全配置**: API 密钥通过环境变量管理
@@ -28,6 +29,7 @@
 ├── 1whisper.py               # Whisper 语音识别模块
 ├── 2data-cleansing.py        # 数据清理模块
 ├── 3llm.py                   # LLM 分析模块
+├── 4add_paragraph_layer.py   # 段落层结构添加模块
 ├── gemini.py                 # Gemini API 封装
 ├── models_config.py          # 模型配置文件
 ├── .env                      # 环境变量配置 (需要创建)
@@ -42,7 +44,8 @@
 ├── 原始媒体/                  # 音频文件存放目录
 ├── 1transcript-raw/          # Whisper 原始转录结果
 ├── 2cleaned-data/            # 清理后的结构化数据
-└── 3llm/                     # LLM 分析最终结果
+├── 3llm/                     # LLM 分析结果
+└── 4final/                   # 最终带段落结构的输出
 ```
 
 ## 安装和设置
@@ -151,7 +154,8 @@ main("./path/to/your/audio.mp3")
 - 输入: `./原始媒体/example.mp3`
 - Whisper 输出: `1transcript-raw/example.json`
 - 清理数据: `2cleaned-data/example-cleaned.json`
-- 最终结果: `3llm/example-cleaned-gemini.json`
+- LLM 分析: `3llm/example-cleaned-gemini.json`
+- 最终结果: `4final/example-cleaned-gemini-final.json`
 
 ### 视频转音频工具
 
@@ -234,6 +238,12 @@ python 2data-cleansing.py
 python 3llm.py
 ```
 
+#### 4. 添加段落结构
+
+```bash
+python 4add_paragraph_layer.py
+```
+
 ### 自定义配置
 
 #### 选择 Whisper 模型
@@ -261,7 +271,8 @@ graph LR
     B --> C[数据清理]
     C --> D[句子提取]
     D --> E[Gemini 分析]
-    E --> F[结构化结果]
+    E --> F[添加段落层]
+    F --> G[结构化结果]
 ```
 
 ### 详细步骤
@@ -276,17 +287,23 @@ graph LR
    - 自动统计每句子和总体的 token 数量
    - 统一管理所有索引编号（从0开始）
    - 自动添加时间戳信息（start/end时间）到分析结果
+5. **段落结构**: 添加 Paragraph 层，支持更复杂的文档结构组织
 
 ## 输出格式
 
-最终输出的 JSON 文件包含详细的分析结果：
+最终输出的 JSON 文件包含详细的分析结果和段落结构：
 
 ```json
 {
   "language": "en",
   "total_sentences": 3,
   "total_tokens": 28,
-  "sentences": [
+  "total_paragraphs": 3,
+  "paragraphs": [
+    {
+      "index": 0,
+      "total_sentences": 1,
+      "sentences": [
     {
       "index": 0,
       "text": "Number one most racist country in Europe...",
@@ -306,6 +323,7 @@ graph LR
           "explanation": "最种族主义的"
         }
       ]
+    }]
     }
   ]
 }
@@ -315,11 +333,14 @@ graph LR
 
 - `total_sentences`: 总句子数
 - `total_tokens`: 所有句子的 token 总数
-- `sentences[].index`: 句子在整个文本中的编号（从0开始）
-- `sentences[].start`: 句子在音频中的开始时间（秒）
-- `sentences[].end`: 句子在音频中的结束时间（秒）
-- `sentences[].total_tokens`: 当前句子的 token 数量
-- `sentences[].tokens[].index`: token 在当前句子中的编号（从0开始）
+- `total_paragraphs`: 总段落数
+- `paragraphs[].index`: 段落编号（从0开始）
+- `paragraphs[].total_sentences`: 段落内的句子数量
+- `paragraphs[].sentences[].index`: 句子在整个文本中的编号（从0开始）
+- `paragraphs[].sentences[].start`: 句子在音频中的开始时间（秒）
+- `paragraphs[].sentences[].end`: 句子在音频中的结束时间（秒）
+- `paragraphs[].sentences[].total_tokens`: 当前句子的 token 数量
+- `paragraphs[].sentences[].tokens[].index`: token 在当前句子中的编号（从0开始）
 
 ## 技术架构
 
@@ -334,10 +355,16 @@ graph LR
 - 统一管理所有索引分配（句子索引、token 索引）
 - 负责 token 数量统计（单句和总体）
 - 处理批次分组和并行执行
-- 数据整合和最终输出格式化
+- 数据整合和输出格式化
 - 根据索引自动添加时间戳信息（start/end时间）
 
-这种设计确保了职责清晰，gemini.py 专注于 AI 分析，3llm.py 负责数据组织。
+**4add_paragraph_layer.py**:
+- 将句子组织成段落结构
+- 为文档添加更高层级的组织
+- 支持未来的多段落、多层级文档结构
+- 生成最终的带完整层级的输出格式
+
+这种设计确保了职责清晰，gemini.py 专注于 AI 分析，3llm.py 负责数据组织，4add_paragraph_layer.py 负责文档结构化。
 
 ## 常见问题
 

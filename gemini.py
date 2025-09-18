@@ -16,9 +16,15 @@ if not API_KEY:
 
 # Define Pydantic data structures
 
+class SemanticElement(BaseModel):
+    id: int = Field(description="ID，现在随机生成")
+    baseForm: str = Field(description="单词原形")
+    dictionary: str = Field(description="词典释义，对该语义元素的解释")
+
 class SubtitleToken(BaseModel):
     text: str = Field(description="token 的文本内容")
-    explanation: str = Field(description="对该 token 的中文解释/注释")
+    explanation: str = Field(description="根据上下文对该 token 的中文解释/注释")
+    semanticElement: SemanticElement = Field(description="在词典中的语义元素信息")
 
 class Sentence(BaseModel):
     text: str = Field(description="句子的完整英文原文")
@@ -39,10 +45,14 @@ def analyze_english_text_to_sentences(text_to_analyze: str) -> types.GenerateCon
         请将以下英文文本进行结构化分析。请严格遵循以下指示：
         1.  按顺序为每个句子提供一个整体的中文翻译或解释（explanation）。
         2.  按顺序将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，对于简单常用的单词，也可分为短语固定搭配，类似by the way/at the same time/deal with。
-        3.  为每个分片（token）提供详细的中文解释（explanation）。
-        4.  对于超简单，最常用单词，比如if, is, are, the, but, or, a, and等，允许中文解释（explanation）为空。
-        5.  任何标点符号都应被视为一个独立的分片（token），中文解释（explanation）为空。
-        6.  严格按照我提供的 JSON schema 格式，输出一个包含句子列表的 JSON 对象。
+        3.  为每个分片（token）提供符合上下文语境的中文解释（explanation），标点符号为空。
+        4.  对于超简单，最常用单词，比如if, is, are, the, but, or, a, and等，允许explanation为空，你自行决定。
+        5.  为每个token生成一个semanticElement对象，包含：
+           - id: 随机生成的数字ID
+           - baseForm: 单词的原形（如running -> run，studies -> study，标点符号为空）
+           - dictionary: 词典释义 (标点符号为空)
+        6.  任何标点符号都应被视为一个独立的token，explanation和semanticElement所有字段为空。
+        7.  严格按照我提供的 JSON schema 格式，输出一个包含句子列表的 JSON 对象。
 
         需要分析的英文文本如下：
         ---
@@ -105,6 +115,7 @@ if __name__ == "__main__":
                 print("  Tokens 详解:")
                 for j, token in enumerate(sentence.tokens):
                     print(f"    - {j}. '{token.text}': {token.explanation}")
+                    print(f"      语义元素 ID: {token.semanticElement.id}, 原形: '{token.semanticElement.baseForm}', 词典: '{token.semanticElement.dictionary}'")
         else:
             print("未能成功解析响应或响应中不包含句子。")
             print("原始响应内容:", api_response.text)
