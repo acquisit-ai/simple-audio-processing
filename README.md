@@ -2,6 +2,11 @@
 
 一个完整的音频处理流水线，用于将音频文件转录为文本并进行智能分析。该项目使用 Whisper 进行语音识别，然后通过 Gemini API 对转录内容进行深度分析和词汇解释。
 
+⏱️ gemini 时间统计:
+总处理时间: 189.58 秒
+平均批次时间: 36.84 秒
+处理批次数: 23
+
 ## 功能特性
 
 - 🎵 **多模型语音识别**: 支持多种 Whisper 模型 (WhisperX, OpenAI Whisper, Whisper Diarization 等)
@@ -113,7 +118,7 @@ python main.py
 
 main.py 现在支持参数化，你可以通过以下方式使用：
 
-#### 方法1: 修改代码中的文件路径
+#### 方法 1: 修改代码中的文件路径
 
 编辑 `main.py` 末尾的 `audio_file` 变量：
 
@@ -124,7 +129,7 @@ if __name__ == "__main__":
     main(audio_file)
 ```
 
-#### 方法2: 在代码中调用函数
+#### 方法 2: 在代码中调用函数
 
 ```python
 from main import main
@@ -141,7 +146,7 @@ main("./path/to/your/audio.mp3")
 系统会基于音频文件名自动生成所有输出路径：
 
 - 输入: `./原始媒体/example.mp3`
-- Whisper输出: `1transcript-raw/example.json`
+- Whisper 输出: `1transcript-raw/example.json`
 - 清理数据: `2cleaned-data/example-cleaned.json`
 - 最终结果: `3llm/example-cleaned-gemini.json`
 
@@ -186,6 +191,7 @@ if __name__ == "__main__":
 ```
 
 然后运行：
+
 ```bash
 python 0video_to_audio.py
 ```
@@ -299,6 +305,7 @@ A: 支持 MP3, MP4, WAV, AVI, MOV 等常见格式。
 ### Q: 如何更改处理的音频文件？
 
 A: 有两种方法：
+
 1. 修改 `main.py` 末尾 `if __name__ == "__main__":` 块中的 `audio_file` 变量
 2. 在代码中直接调用 `main("./path/to/your/audio.mp3")`
 
