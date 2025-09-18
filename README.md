@@ -23,6 +23,7 @@
 ├── models_config.py          # 模型配置文件
 ├── .env                      # 环境变量配置 (需要创建)
 ├── .env.example              # 环境变量模板
+├── requirements.txt          # Python 依赖列表
 ├── .gitignore                # Git 忽略文件配置
 └── README.md                 # 项目文档
 ```
@@ -57,16 +58,25 @@ venv\Scripts\activate     # Windows
 ### 3. 安装依赖
 
 ```bash
-pip install replicate google-genai python-dotenv
+pip install -r requirements.txt
 ```
+
+或者手动安装：
+
+```bash
+pip install replicate>=0.15.0 google-genai>=0.6.0 python-dotenv>=1.0.0 pydantic>=2.0.0
+```
+
+#### 依赖说明
+
+- **replicate**: Replicate API 客户端，用于调用 Whisper 模型
+- **google-genai**: Google Gemini API 客户端，用于文本分析
+- **python-dotenv**: 环境变量管理，用于安全存储 API 密钥
+- **pydantic**: 数据验证和序列化，用于结构化 API 响应
 
 ### 4. 配置 API 密钥
 
 复制环境变量模板并填入你的 API 密钥：
-
-```bash
-cp .env.example .env
-```
 
 编辑 `.env` 文件：
 
@@ -86,6 +96,7 @@ REPLICATE_API_TOKEN=your_replicate_token_here
 ### 5. 准备音频文件
 
 将要处理的音频文件放入 `原始媒体/` 目录中。支持的格式：
+
 - MP3, MP4, WAV, AVI, MOV 等
 
 ## 使用方法
@@ -189,19 +200,25 @@ graph LR
 ## 常见问题
 
 ### Q: 支持哪些音频格式？
+
 A: 支持 MP3, MP4, WAV, AVI, MOV 等常见格式。
 
 ### Q: 如何更改处理的音频文件？
+
 A: 修改 `main.py` 中的 `audio_file` 变量路径。
 
 ### Q: API 调用失败怎么办？
+
 A: 检查：
+
 1. API 密钥是否正确设置
 2. 网络连接是否正常
 3. API 服务是否正常
 
 ### Q: 如何提高处理速度？
+
 A: 可以调整 `3llm.py` 中的并行参数：
+
 - 增加 `DEFAULT_MAX_WORKERS`
 - 调整 `DEFAULT_BATCH_SIZE`
 

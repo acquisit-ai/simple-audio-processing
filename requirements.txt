@@ -1,0 +1,19 @@
+# Core API clients
+replicate>=0.15.0
+google-genai>=0.6.0
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Data validation and processing
+pydantic>=2.0.0
+
+# Standard libraries included with Python:
+# - json (built-in)
+# - os (built-in)
+# - sys (built-in)
+# - pathlib (built-in)
+# - typing (built-in)
+# - importlib (built-in)
+# - time (built-in)
+# - concurrent.futures (built-in)
