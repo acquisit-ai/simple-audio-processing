@@ -12,6 +12,8 @@
 - 🎵 **多模型语音识别**: 支持多种 Whisper 模型 (WhisperX, OpenAI Whisper, Whisper Diarization 等)
 - 🧹 **智能数据清理**: 自动清理和结构化转录数据
 - 🤖 **AI 文本分析**: 使用 Gemini API 进行句子分析和词汇解释
+- 📊 **Token 统计**: 自动统计每个句子和整体的 token 数量
+- 🔢 **索引管理**: 统一管理句子和 token 索引，确保从0开始的连续编号
 - 🔄 **并行处理**: 支持批量并行处理提高效率
 - 🔐 **安全配置**: API 密钥通过环境变量管理
 - 📊 **完整流水线**: 从音频文件到结构化分析结果的一站式处理
@@ -270,6 +272,8 @@ graph LR
    - 整句翻译/解释
    - 词汇分解和解释
    - 语法结构分析
+   - 自动统计每句子和总体的 token 数量
+   - 统一管理所有索引编号（从0开始）
 
 ## 输出格式
 
@@ -279,22 +283,54 @@ graph LR
 {
   "language": "en",
   "total_sentences": 3,
+  "total_tokens": 28,
   "sentences": [
     {
       "index": 0,
       "text": "Number one most racist country in Europe...",
       "explanation": "欧洲最种族主义的国家排名第一...",
+      "total_tokens": 13,
       "tokens": [
         {
           "index": 0,
           "text": "Number one",
           "explanation": "排名第一"
+        },
+        {
+          "index": 1,
+          "text": "most racist",
+          "explanation": "最种族主义的"
         }
       ]
     }
   ]
 }
 ```
+
+### 输出字段说明
+
+- `total_sentences`: 总句子数
+- `total_tokens`: 所有句子的 token 总数
+- `sentences[].index`: 句子在整个文本中的编号（从0开始）
+- `sentences[].total_tokens`: 当前句子的 token 数量
+- `sentences[].tokens[].index`: token 在当前句子中的编号（从0开始）
+
+## 技术架构
+
+### 模块职责分离
+
+**gemini.py**:
+- 专注于纯文本分析和语言处理
+- 不处理索引逻辑，由 Gemini API 返回无索引的结构化数据
+- 提供 Pydantic 模型验证确保数据质量
+
+**3llm.py**:
+- 统一管理所有索引分配（句子索引、token 索引）
+- 负责 token 数量统计（单句和总体）
+- 处理批次分组和并行执行
+- 数据整合和最终输出格式化
+
+这种设计确保了职责清晰，gemini.py 专注于 AI 分析，3llm.py 负责数据组织。
 
 ## 常见问题
 

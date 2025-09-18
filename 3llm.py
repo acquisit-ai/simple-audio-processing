@@ -99,12 +99,13 @@ def analyze_batch_wrapper(batch_info: Tuple[int, List[dict]], stop_event: thread
         stop_event.set()
         return (batch_idx, [], batch_time)
 
-def process_sentences_with_llm(sentences_data: dict, output_path: str = None, batch_size: int = DEFAULT_BATCH_SIZE, max_workers: int = DEFAULT_MAX_WORKERS) -> None:
+def process_sentences_with_llm(sentences_data: dict, original_data: dict = None, output_path: str = None, batch_size: int = DEFAULT_BATCH_SIZE, max_workers: int = DEFAULT_MAX_WORKERS) -> None:
     """
     使用Gemini API并行批量处理清理后的句子。
 
     参数:
         sentences_data: 简化后的句子数据字典
+        original_data: 包含时间信息的原始数据
         output_path: 可选输出路径，不提供则自动生成'-gemini'后缀
         batch_size: 每批次处理的句子数量（默认10个）
         max_workers: 最大并行线程数（默认5个）
@@ -179,6 +180,11 @@ def process_sentences_with_llm(sentences_data: dict, output_path: str = None, ba
 
     print(f"\n按正确顺序合并结果...")
 
+    # 如果提供了原始数据，添加时间信息
+    if original_data:
+        print(f"添加时间信息...")
+        all_analyzed_sentences = add_timing_data_to_sentences(all_analyzed_sentences, original_data)
+
     # 计算每个句子的token数量并统计总数
     total_tokens = 0
     for sentence in all_analyzed_sentences:
@@ -202,6 +208,32 @@ def process_sentences_with_llm(sentences_data: dict, output_path: str = None, ba
     # 保存分析后的数据
     save_llm_result(final_result, output_path, all_analyzed_sentences, total_time, batch_times, total_batches)
 
+
+def add_timing_data_to_sentences(analyzed_sentences: list, original_data: dict) -> list:
+    """
+    根据index将原始数据中的start和end时间信息添加到分析后的句子中
+
+    Args:
+        analyzed_sentences: 分析后的句子列表
+        original_data: 包含时间信息的原始数据
+
+    Returns:
+        添加了时间信息的句子列表
+    """
+    # 创建原始句子的索引映射
+    original_sentences_map = {}
+    for sentence in original_data.get('sentences', []):
+        original_sentences_map[sentence['index']] = sentence
+
+    # 为分析后的句子添加时间信息
+    for sentence in analyzed_sentences:
+        sentence_index = sentence['index']
+        if sentence_index in original_sentences_map:
+            original_sentence = original_sentences_map[sentence_index]
+            sentence['start'] = original_sentence['start']
+            sentence['end'] = original_sentence['end']
+
+    return analyzed_sentences
 
 def save_llm_result(final_result: dict, output_path: str, all_analyzed_sentences: list, total_time: float, batch_times: list, total_batches: int) -> None:
     """
@@ -233,7 +265,7 @@ def save_llm_result(final_result: dict, output_path: str, all_analyzed_sentences
     print(f"  处理批次数: {total_batches}")
 
 
-def extract_sentences_only(input_path: str) -> dict:
+def extract_sentences_only(input_path: str) -> tuple[dict, dict]:
     """
     从句子中仅提取index和text字段，返回内存中的数据。
 
@@ -241,15 +273,15 @@ def extract_sentences_only(input_path: str) -> dict:
         input_path: 清理后的JSON文件路径
 
     返回:
-        简化后的数据字典
+        (简化后的数据字典, 原始数据字典) 的元组
     """
     # 读取清理后的数据
     with open(input_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+        original_data = json.load(f)
 
     # 仅提取句子的index和text字段
     simplified_sentences = []
-    for sentence in data.get('sentences', []):
+    for sentence in original_data.get('sentences', []):
         simplified_sentence: Sentence = {
             'index': sentence['index'],
             'text': sentence['text']
@@ -257,23 +289,23 @@ def extract_sentences_only(input_path: str) -> dict:
         simplified_sentences.append(simplified_sentence)
 
     # 创建简化的段落结构
-    paragraph: Paragraph = {
+    simplified_data: Paragraph = {
         'sentences': simplified_sentences
     }
 
     print(f"已提取句子数量: {len(simplified_sentences)}")
 
-    return paragraph
+    return simplified_data, original_data
 
 if __name__ == '__main__':
     # 直接执行，无需命令行参数
-    input_file = '2cleaned-data/3min2-cleaned.json'
-    output_file = '3llm/3min2-cleaned-gemini.json'
+    input_file = '2cleaned-data/3min1-cleaned.json'
+    output_file = '3llm/3min1-cleaned-gemini.json'
 
     # 步骤1: 在内存中提取句子
     print("步骤1: 提取句子...")
-    simplified_data = extract_sentences_only(input_file)
+    simplified_data, original_data = extract_sentences_only(input_file)
 
     # 步骤2: 使用LLM处理
     print("\n步骤2: 使用Gemini API处理...")
-    process_sentences_with_llm(simplified_data, output_file)
+    process_sentences_with_llm(simplified_data, original_data, output_file)

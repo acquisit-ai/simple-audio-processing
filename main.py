@@ -98,6 +98,6 @@ def main(audio_file="./原始媒体/3min1.mp3"):
 
 if __name__ == "__main__":
     # 定义音频文件路径
-    audio_file = "原始媒体/Most racist countries in Europe.mp3"
+    audio_file = "原始媒体/3min1.mp3"
 
     main(audio_file)

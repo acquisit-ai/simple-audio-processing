@@ -78,6 +78,7 @@ secrets.json
 
 # Claude Code settings
 .claude/
+CLAUDE.md
 
 # Output directories (generated content)
 1transcript-raw/
