@@ -22,7 +22,6 @@
 ├── gemini.py                 # Gemini API 封装
 ├── models_config.py          # 模型配置文件
 ├── .env                      # 环境变量配置 (需要创建)
-├── .env.example              # 环境变量模板
 ├── requirements.txt          # Python 依赖列表
 ├── .gitignore                # Git 忽略文件配置
 └── README.md                 # 项目文档
@@ -42,8 +41,8 @@
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/acquisit-ai/simple-audio-processing.git
-cd simple-audio-processing
+git clone <repository-url>
+cd whisper
 ```
 
 ### 2. 创建虚拟环境
@@ -76,9 +75,7 @@ pip install replicate>=0.15.0 google-genai>=0.6.0 python-dotenv>=1.0.0 pydantic>
 
 ### 4. 配置 API 密钥
 
-复制环境变量模板并填入你的 API 密钥：
-
-编辑 `.env` 文件：
+创建 `.env` 文件并填入你的 API 密钥：
 
 ```env
 # Gemini API Configuration
@@ -109,6 +106,42 @@ REPLICATE_API_TOKEN=your_replicate_token_here
 ```bash
 python main.py
 ```
+
+### 自定义音频文件
+
+main.py 现在支持参数化，你可以通过以下方式使用：
+
+#### 方法1: 修改代码中的文件路径
+
+编辑 `main.py` 末尾的 `audio_file` 变量：
+
+```python
+if __name__ == "__main__":
+    # 定义音频文件路径
+    audio_file = "./原始媒体/your_audio_file.mp3"
+    main(audio_file)
+```
+
+#### 方法2: 在代码中调用函数
+
+```python
+from main import main
+
+# 使用默认路径
+main()
+
+# 使用自定义音频文件
+main("./path/to/your/audio.mp3")
+```
+
+#### 自动路径生成
+
+系统会基于音频文件名自动生成所有输出路径：
+
+- 输入: `./原始媒体/example.mp3`
+- Whisper输出: `1transcript-raw/example.json`
+- 清理数据: `2cleaned-data/example-cleaned.json`
+- 最终结果: `3llm/example-cleaned-gemini.json`
 
 ### 分步执行
 
@@ -205,7 +238,9 @@ A: 支持 MP3, MP4, WAV, AVI, MOV 等常见格式。
 
 ### Q: 如何更改处理的音频文件？
 
-A: 修改 `main.py` 中的 `audio_file` 变量路径。
+A: 有两种方法：
+1. 修改 `main.py` 末尾 `if __name__ == "__main__":` 块中的 `audio_file` 变量
+2. 在代码中直接调用 `main("./path/to/your/audio.mp3")`
 
 ### Q: API 调用失败怎么办？
 
