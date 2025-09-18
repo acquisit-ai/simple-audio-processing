@@ -42,7 +42,7 @@ def analyze_english_text_to_sentences(text_to_analyze: str) -> types.GenerateCon
         1.  为每个句子提供一个整体的中文翻译或解释（explanation）。
         2.  将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，对于简单常用的单词，也可分为短语固定搭配，类似by the way/at the same time/deal with。
         3.  为每个分片（token）提供详细的中文解释（explanation）。
-        4.  对于简单介词或者连词，比如if, the, but, or, a, and等，可以中文解释（explanation）为空。
+        4.  对于超简单，最常用单词，比如if, is, are, the, but, or, a, and等，允许中文解释（explanation）为空。
         5.  任何标点符号都应被视为一个独立的分片（token），中文解释（explanation）为空。
         6.  严格按照我提供的 JSON schema 格式，输出一个包含句子列表的 JSON 对象。
 
