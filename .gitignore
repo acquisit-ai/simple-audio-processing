@@ -60,6 +60,9 @@ logs/
 *.m4a
 *.aac
 *.ogg
+*.srt
+*.m4s
+*.m3u8
 
 # Temporary files
 *.tmp

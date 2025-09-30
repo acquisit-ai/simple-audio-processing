@@ -140,9 +140,9 @@ def batch_convert_videos(input_dir, output_dir=None, audio_format="mp3", start=N
 if __name__ == "__main__":
     # 示例用法：直接调用函数
 
-    # 单文件转换示例
-    video_path = "./original-media/Most racist countries in Europe.mp4"
-    output_path = "./original-media/Most racist countries in Europe.mp3"
+    # 单文件转换示例    
+    video_path = "./original-media/test-portrait.mkv"
+    output_path = "./original-media/test-portrait.mp3"
     start = 0  # 开始时间（秒），None表示从头开始
     end = 180  # 结束时间（秒），None表示到结尾
 
