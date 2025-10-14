@@ -80,15 +80,22 @@ def convert_to_fmp4_hls(input_file, output_dir=None, use_gpu=False):
         sys.exit(1)
 
 if __name__ == "__main__":
-    input_video = "original-media/1.mp4"
+    input_video = "original-media/001.mp4"
     # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
     convert_to_fmp4_hls(input_video, use_gpu=True)
-    input_video = "original-media/2.mp4"
-    # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
-    convert_to_fmp4_hls(input_video, use_gpu=True)    
-    input_video = "original-media/3.mp4"
-    # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
-    convert_to_fmp4_hls(input_video, use_gpu=True)    
-    input_video = "original-media/4.mp4"
-    # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
+    input_video = "original-media/002.mp4"
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/003.mp4"
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/004.mp4"
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/005.mp4"
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/006.mp4"
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/007.MOV"
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/008.MOV"
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/009.MOV"
     convert_to_fmp4_hls(input_video, use_gpu=True)
