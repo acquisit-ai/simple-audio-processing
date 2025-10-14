@@ -69,6 +69,65 @@ def convert_video_to_audio(video_path, output_path=None, audio_format="mp3", sta
         raise
 
 
+def batch_convert_videos_from_lists(input_list, output_list=None, audio_format="mp3", start=None, end=None):
+    """
+    批量转换视频文件（使用输入输出列表）
+
+    Args:
+        input_list (list): 输入视频文件路径列表
+        output_list (list, optional): 输出音频文件路径列表，如果不指定则自动生成
+        audio_format (str): 输出音频格式，默认为 "mp3"
+        start (float, optional): 开始时间（秒），如果不指定则从头开始
+        end (float, optional): 结束时间（秒），如果不指定则到结尾
+
+    Returns:
+        list: 成功转换的音频文件路径列表
+    """
+
+    if not input_list:
+        print("输入列表为空")
+        return []
+
+    # 如果没有指定输出列表，自动生成
+    if output_list is None:
+        output_list = []
+        for video_path in input_list:
+            video_file = Path(video_path)
+            auto_output = video_file.parent / f"{video_file.stem}.{audio_format}"
+            output_list.append(str(auto_output))
+
+    # 检查输入输出列表长度是否一致
+    if len(input_list) != len(output_list):
+        raise ValueError(f"输入列表和输出列表长度不一致: {len(input_list)} vs {len(output_list)}")
+
+    print(f"准备转换 {len(input_list)} 个视频文件")
+
+    converted_files = []
+    failed_files = []
+
+    for i, (video_path, audio_path) in enumerate(zip(input_list, output_list), 1):
+        print(f"\n[{i}/{len(input_list)}] 处理: {video_path}")
+        try:
+            # 转换视频
+            result = convert_video_to_audio(video_path, audio_path, audio_format, start, end)
+            converted_files.append(result)
+
+        except Exception as e:
+            print(f"❌ 转换失败 {video_path}: {e}")
+            failed_files.append(video_path)
+
+    # 输出结果摘要
+    print(f"\n" + "="*50)
+    print(f"批量转换完成:")
+    print(f"✅ 成功: {len(converted_files)} 个文件")
+    if failed_files:
+        print(f"❌ 失败: {len(failed_files)} 个文件")
+        for failed in failed_files:
+            print(f"   - {failed}")
+
+    return converted_files
+
+
 def batch_convert_videos(input_dir, output_dir=None, audio_format="mp3", start=None, end=None):
     """
     批量转换目录中的所有视频文件
@@ -140,18 +199,51 @@ def batch_convert_videos(input_dir, output_dir=None, audio_format="mp3", start=N
 if __name__ == "__main__":
     # 示例用法：直接调用函数
 
-    # 单文件转换示例    
-    video_path = "./original-media/test-portrait.mkv"
-    output_path = "./original-media/test-portrait.mp3"
-    start = 0  # 开始时间（秒），None表示从头开始
-    end = 180  # 结束时间（秒），None表示到结尾
+    # 单文件转换示例
+    # video_path = "./original-media/001.mp4"
+    # output_path = "./original-media/001.mp3"
+    # start = 0  # 开始时间（秒），None表示从头开始
+    # end = 180  # 结束时间（秒），None表示到结尾
 
+    # try:
+    #     convert_video_to_audio(video_path, output_path)
+    # except Exception as e:
+    #     print(f"转换失败: {e}")
+
+    # 批量转换示例（使用列表）（注释掉，需要时取消注释）
+    # input_videos = [
+    #     "./original-media/001.mp4",
+    #     "./original-media/002.mp4",
+    #     "./original-media/003.mp4"
+    # ]
+    # output_audios = [
+    #     "./audios/001.mp3",
+    #     "./audios/002.mp3",
+    #     "./audios/003.mp3"
+    # ]
+    # try:
+    #     batch_convert_videos_from_lists(input_videos, output_audios)
+    # except Exception as e:
+    #     print(f"批量转换失败: {e}")
+
+    #批量转换示例（自动生成输出路径）（注释掉，需要时取消注释）
+    input_videos = [
+        "./original-media/001.mp4",
+        "./original-media/002.mp4",
+        "./original-media/003.mp4",
+        "./original-media/004.mp4",
+        "./original-media/005.mp4",
+        "./original-media/006.mp4",
+        "./original-media/007.MOV",
+        "./original-media/008.MOV",
+        "./original-media/009.MOV"
+    ]
     try:
-        convert_video_to_audio(video_path, output_path)
+        batch_convert_videos_from_lists(input_videos)  # 输出路径自动生成
     except Exception as e:
-        print(f"转换失败: {e}")
+        print(f"批量转换失败: {e}")
 
-    # 批量转换示例（注释掉，需要时取消注释）
+    # 批量转换目录示例（注释掉，需要时取消注释）
     # try:
     #     batch_convert_videos("./original-media/", "./audios/", "mp3", 0, 60)
     # except Exception as e:

@@ -44,7 +44,21 @@ def analyze_english_text_to_sentences(text_to_analyze: str) -> types.GenerateCon
         prompt = f"""
         请将以下英文文本进行结构化分析。请严格遵循以下指示：
         1.  按顺序为每个句子提供一个整体的中文翻译或解释（explanation）。
-        2.  按顺序将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，对于简单常用的单词，也可分为短语固定搭配，类似by the way/at the same time/deal with。
+        2.  按顺序将每个句子进一步分解为有意义的语言元素分片（SubtitleToken）可以是单词，对于简单常用的单词，也可分为短语固定搭配。
+            **以英语学习为目的拆分**：对于难度稍高的词组（如"be addicted to"），应该作为一个token，在explanation中同时解释短语含义和核心单词，semanticElement.baseForm应为核心词的原形（如"addicted"）。
+
+            正面例子（应该这样拆分）：
+            - "by the way" -> 保持为一个token（固定短语）
+            - "deal with" -> 保持为一个token（固定搭配）
+            - "at the same time" -> 保持为一个token（固定短语）
+            - "looking forward to" -> 保持为一个token（固定搭配）
+            - "be addicted to" -> 保持为一个token，explanation: "对...上瘾；addicted表示沉迷的、上瘾的"，baseForm: "addicted"
+            - "get rid of" -> 保持为一个token，explanation: "摆脱、除去；rid表示使摆脱"，baseForm: "rid"
+
+            反面例子（不该这样拆分）：
+            - "I am happy" -> 不要拆成"I am"作为一个token，应该分别为"I"、"am"、"happy"三个token
+            - "the book" -> 不要保持为一个token，应该分别为"the"、"book"两个token
+            - "very good" -> 不要保持为一个token，应该分别为"very"、"good"两个token
         3.  为每个分片（token）提供符合上下文语境的中文解释（explanation），标点符号为空。
         4.  对于超简单，最常用单词，比如if, is, are, the, but, or, a, and等，允许explanation为空，你自行决定。
         5.  为每个token生成一个semanticElement对象，包含：

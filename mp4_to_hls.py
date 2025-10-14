@@ -80,6 +80,15 @@ def convert_to_fmp4_hls(input_file, output_dir=None, use_gpu=False):
         sys.exit(1)
 
 if __name__ == "__main__":
-    input_video = "original-media/test2.mp4"
+    input_video = "original-media/1.mp4"
+    # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
+    convert_to_fmp4_hls(input_video, use_gpu=True)
+    input_video = "original-media/2.mp4"
+    # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
+    convert_to_fmp4_hls(input_video, use_gpu=True)    
+    input_video = "original-media/3.mp4"
+    # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
+    convert_to_fmp4_hls(input_video, use_gpu=True)    
+    input_video = "original-media/4.mp4"
     # 设置 use_gpu=True 启用 GPU 加速（macOS 使用 VideoToolbox，Linux/Windows 使用 NVENC）
     convert_to_fmp4_hls(input_video, use_gpu=True)
