@@ -102,3 +102,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+**/fine_unit_rows*
+**/*.jsonl

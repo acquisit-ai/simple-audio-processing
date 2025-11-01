@@ -242,7 +242,7 @@ def main():
 
     parser.add_argument(
         '-u', '--url',
-        default='https://storage.googleapis.com/demo-vedios-cyberdinzhen/demo-hls/001_hls/playlist.m3u8',
+        default='https://storage.googleapis.com/demo-vedios-cyberdinzhen/demo-hls/009_hls/playlist.m3u8',
         help='HLS视频的m3u8 URL (默认: demo视频)'
     )
 
