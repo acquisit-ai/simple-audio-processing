@@ -218,7 +218,7 @@ def call_openai_with_retry(
             # 这里每次调用都创建独立的 OpenAI 客户端，避免线程之间共享会话导致的潜在竞态。
             client = OpenAI()
             response = client.responses.create(
-                model="gpt-5-mini",
+                model="gpt-5",
                 instructions=instructions,
                 input=prompt,
                 text={"format": json_schema},
@@ -313,8 +313,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=20,
-        help="Limit to the first N keys (after filtering by --only-key if provided). Default: 20 for small-sample validation.",
+        default=None,
+        help="Optionally limit to the first N keys (after filtering by --only-key if provided).",
     )
     parser.add_argument(
         "--output",
@@ -432,7 +432,7 @@ def main() -> None:
                         ffail.write("\n")
                         ffail.flush()
                     completed += 1
-                    print(f"[{completed}/{total}] wrote index {next_to_write} ({'OK' if status2=='ok' else 'FAIL'})")
+                    print(f"[{completed}/{total}] wrote index {next_to_write + 1} ({'OK' if status2=='ok' else 'FAIL'})")
                     next_to_write += 1
 
     print(f"Done. Appended outputs to {args.output} and failures to {args.failed_output}.")
