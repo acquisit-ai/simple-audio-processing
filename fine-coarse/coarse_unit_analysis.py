@@ -218,7 +218,7 @@ def call_openai_with_retry(
             # 这里每次调用都创建独立的 OpenAI 客户端，避免线程之间共享会话导致的潜在竞态。
             client = OpenAI()
             response = client.responses.create(
-                model="gpt-5",
+                model="gpt-5-mini",
                 instructions=instructions,
                 input=prompt,
                 text={"format": json_schema},
@@ -331,8 +331,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=8,
-        help="Max number of parallel threads (default: 8). Tune to match API rate limits.",
+        default=10,
+        help="Max number of parallel threads (default: 10). Tune to match API rate limits.",
     )
     parser.add_argument(
         "--timeout",
