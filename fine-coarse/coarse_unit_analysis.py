@@ -9,7 +9,7 @@ Usage examples:
   python script.py --input fine-coarse/fine_unit_rows_multiple.json --output fine-coarse/coarse_senses.jsonl
 
   # Process only one key for testing
-  python script.py --only-key "[word, abstract]"
+  python script.py --only-key "[phrase, abstract]"
 
   # Control workers / timeout / retries / limit
   python script.py --workers 8 --timeout 90 --retries 2 --limit 100 --only-key "[word, abandon]"
@@ -67,8 +67,9 @@ JSON_SCHEMA = {
                         "chinese_def": {"type": "string"},
                         "chinese_criteria": {"type": "string"},
                         "chinese_label": {"type": "string"},
+                        "english_label": {"type": "string"},
                     },
-                    "required": ["ids", "pos", "english_def", "chinese_def", "chinese_criteria", "chinese_label"],
+                    "required": ["ids", "pos", "english_def", "chinese_def", "chinese_criteria", "chinese_label", "english_label"],
                 },
             }
         },
@@ -76,6 +77,19 @@ JSON_SCHEMA = {
     },
 }
 
+TARGET_WORD_LABELS = [
+    "orange",
+    "apple",
+    "significant",
+    "elephant",
+    "pornography",
+    "versatile",
+    "run",
+    "go",
+    "season",
+    "design",
+    "record",
+]
 # ---------------------------------------------------------------------------
 # 发送给模型的系统级指令说明
 # ---------------------------------------------------------------------------
@@ -85,57 +99,48 @@ JSON_SCHEMA = {
 # - 明确约束：覆盖全部 id、每个聚合仅包含单一 POS、仅返回 JSON；
 # - 提供聚合原则、释义撰写建议、冲突解决策略与自检要点；尽量避免模型输出偏离主题。
 INSTRUCTIONS = (
-    "You are a senior lexicographer. Your task is to aggregate fine‑grained dictionary senses into a small set of "
-    "learner‑oriented, coarse‑grained sense clusters.\n"
+    "You are a senior lexicographer. Aggregate fine-grained dictionary senses into a small set of "
+    "learner-oriented, coarse-grained clusters for **Chinese learners of English** (Simplified Chinese context).\n"
     "\n"
     "[INPUT]\n"
-    "- The header line provides the headword: 'Fine-grained key: {kind}:{label}'.\n"
-    "- You also receive a JSON array of fine senses; each item has: id (string), pos (string), def (string).\n"
-    "- Your job is to group these fine senses into a few clusters that are most helpful for learners, and output JSON "
-    "that matches the provided schema only.\n"
+    "- Header: 'Fine-grained key: {kind}:{label}'.\n"
+    "- Fine senses: JSON array with ID, Part-of-speech, Definition.\n"
     "\n"
     "[HARD CONSTRAINTS]\n"
-    "1) Coverage & exclusivity: Use every input id exactly once. Do not drop, duplicate, invent, or modify ids.\n"
-    "2) Single POS per cluster: Each cluster must have one pos only, and that pos must be one that actually appears among "
-    "its member senses (e.g., 'verb', 'noun', 'adjective', 'adverb'). If the headword spans multiple POS, create separate "
-    "clusters per POS.\n"
-    "3) JSON only: Return JSON that matches the given schema; do not add any extra text, explanations, or reasoning.\n"
+    "1) Coverage & exclusivity: Use every input id exactly once; no drops, duplicates, inventions, or edits.\n"
+    "2) Single POS per cluster: One pos only, and it must occur among the cluster’s member senses (e.g., 'verb', 'noun', 'adjective', 'adverb'). "
+    "If the headword spans multiple POS, make separate clusters per POS.\n"
+    "3) JSON only: Return JSON that matches the provided schema; no extra text or reasoning.\n"
+    "4) Consolidation for Chinese learners: If two candidate clusters share the same POS and would yield a near-identical chinese_label "
+    "(i.e., the same Chinese concept), merge them. For example, \"design\" meaning “to plan an abstract solution” and “to craft a concrete artistic decoration” share the same Mandarin anchor 设计, so keep them together and use the definitions to mention both scenarios. "
+    "Split only when collocations/argument patterns diverge enough to cause learner errors.\n"
     "\n"
-    "[LEARNER‑CENTRIC GOALS]\n"
-    "- The goal is not to replicate tiny dictionary distinctions but to produce a few clear, teachable uses.\n"
-    "- Ensure learners can easily tell clusters apart and map them to real usage (collocations, arguments, contexts).\n"
-    "- There is no hard limit on the number of clusters, but avoid unnecessary splits; each cluster should present a clear, "
-    "practical usage boundary.\n"
-    "- Order clusters by teaching priority: core/high‑frequency → common extensions → domain‑specific/rare.\n"
+    "[LEARNER-CENTRIC GOALS]\n"
+    "- Aim for a few clear, teachable uses that learners can reliably distinguish in real usage.\n"
+    "- Differences between clusters should be visible in collocations, argument patterns, and contexts (reflected in the definitions).\n"
+    "- Order clusters by teaching priority: core/high-frequency → common extensions → domain-specific/rare.\n"
     "\n"
-    "[CLUSTERING PRINCIPLES (IN PRIORITY ORDER)]\n"
-    "A) Semantic frame & argument structure: Group senses that share the same event/frame and similar argument patterns "
-    "(typical objects, prepositions, who‑does‑what‑to‑what).\n"
-    "B) Literal vs figurative: Split literal/physical meanings from figurative/abstract ones when collocations or syntax "
-    "differ; merge only if learner usage is essentially the same.\n"
-    "C) Domain‑specific uses: Create dedicated clusters for finance/legal/technical uses to aid quick recognition.\n"
-    "D) Same usage, small differences: Merge senses that differ only in intensity/register/style but share the same usage.\n"
-    "E) Process vs result; causative vs state: If they are interchangeable for learners with the same patterns, they may "
-    "be merged; if likely to cause misuse, split them.\n"
+    "[CLUSTERING PRINCIPLES]\n"
+    "A) Semantic frame & arguments first: group senses sharing the same event/frame and similar argument patterns (typical objects, prepositions, who-does-what).\n"
+    "B) Literal vs figurative: split when collocations/syntax differ; merge only if learner usage is essentially the same.\n"
+    "C) Domain-specific: finance/legal/technical uses should be dedicated clusters.\n"
+    "D) Same usage, small differences (intensity/register/style): merge. Like a verb can be used for an abstract concept or a concrete thing, but both are closely related. Minor surface distinctions stay in one cluster; mention the scenarios inside english_def / chinese_def. Reserve splitting for cases that would mislead learners.\n"
+    "E) Process vs result; causative vs state: merge if interchangeable for learners; split if the difference affects usage and error risk.\n"
     "\n"
-    "[GUIDANCE FOR FILLING FIELDS (HIGH FLEXIBILITY)]\n"
-    "- english_def / chinese_def: Write learner‑facing paraphrases (do not copy the input defs). You may include helpful cues "
-    "such as typical collocations, common objects, or scenarios. Keep english_def in English and chinese_def in Simplified Chinese.\n"
-    "- chinese_label: A memorable Chinese label that captures the cluster’s core use (for flashcard‑style learning).\n"
-    "- chinese_criteria: Provide cues that help decide membership—e.g., inclusion/exclusion hints, typical "
-    "collocations, argument hints, replaceable synonyms—use any style that best serves learning.\n"
-    "- ids / pos: Fill according to the schema. No ordering requirements are imposed.\n"
+    "[GUIDANCE FOR FILLING FIELDS]\n"
+    "- english_def / chinese_def: Learner-facing paraphrases (do not copy input defs). Include useful usage cues (typical collocations, common objects, argument structure, scenarios). "
+    "Keep english_def in English and chinese_def in Simplified Chinese.\n"
+    "- chinese_label: A memorable Chinese literal translation capturing the cluster’s core use (flashcard-friendly).\n"
+    "- english_label: Short English explanatory Phrases, near Synonyms, aligned with chinese_label.\n"
+    "(e.g., \"operate/stop\", not \"go (operate/stop)\"; \"extend/lead\", not \"go (extend/lead)\").\n"
+    "- chinese_criteria: Write in Simplified Chinese for **internal auditing only** (not learner-facing). Give decision cues for membership/boundaries "
+    "(e.g., inclusion/exclusion heuristics, diagnostic hints). Do **not** include examples, collocations, or teaching tips here—put such cues in the defs.\n"
+    "- ids / pos: Fill according to the schema.\n"
     "\n"
     "[CONFLICT RESOLUTION]\n"
-    "- Assign a borderline sense to the cluster that maximizes contrast between clusters and reduces learner confusion.\n"
-    "- If a sense spans multiple frames, prefer the more common and transferable frame for learners unless the input clearly "
-    "indicates otherwise.\n"
-    "- When collocations/arguments strongly point to a cluster, treat that as primary evidence.\n"
-    "\n"
-    "[SELF‑CHECK (DO NOT OUTPUT)]\n"
-    "- All ids are covered exactly once; no cluster mixes POS.\n"
-    "- Clusters are distinguishable by collocations/arguments/contexts, not just wording.\n"
-    "- Definitions are learner‑facing and readily usable in real production.\n"
+    "- Assign borderline senses to the cluster that maximizes contrast and reduces learner confusion.\n"
+    "- If a sense spans multiple frames, prefer the more common/transferable frame for Chinese learners unless the input indicates otherwise.\n"
+    "- When collocations/arguments clearly signal a cluster, treat that as primary evidence (reflect these cues in the defs).\n"
 )
 
 def load_api_key(env_path: Path) -> Optional[str]:
@@ -371,6 +376,25 @@ def main() -> None:
     else:
         # dict 在 Python 3.7+ 默认保持插入顺序，直接 list() 即可
         keys = list(data.keys())
+        # 只保留目标词列表中的 word 条目，保持原顺序
+        target_set = {label.lower() for label in TARGET_WORD_LABELS}
+        filtered_keys: List[str] = []
+        for key in keys:
+            try:
+                kind, label = parse_key(key)
+            except ValueError:
+                continue
+            if kind == "word" and label.lower() in target_set:
+                filtered_keys.append(key)
+        if not filtered_keys:
+            print("No matching word entries found for the target label list.")
+            return
+        # 提醒哪些目标缺失
+        existing_labels = {parse_key(k)[1].lower() for k in filtered_keys}
+        missing = [label for label in TARGET_WORD_LABELS if label.lower() not in existing_labels]
+        if missing:
+            print("Warning: missing labels in input JSON:", ", ".join(missing))
+        keys = filtered_keys
 
     # 4. limit 参数用于快速抽样或断点续跑，避免一次跑完整个数据集
     if args.limit is not None:

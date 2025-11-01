@@ -20,10 +20,12 @@ create table if not exists semantic.coarse_unit (
   chinese_def    text,                                         -- 粗粒度中文解释
   chinese_criteria text,                                       -- 中文判据说明（包含/排除的依据）
   chinese_label  text,                                         -- 中文标签/直译
+  english_label  text,                                         -- 英文标签/概述
   pattern        jsonb,                                        -- 可选模式信息
   status         text not null default 'active',               -- 状态
   created_at     timestamptz not null default now(),           -- 创建时间
   updated_at     timestamptz not null default now(),           -- 更新时间
+  version        integer not null default 1,                   -- 版本号（便于后续追踪迭代）
   fine_unit_ids  bigint[] not null,                            -- 关联的细粒度 fine_unit.id 列表
   original_defs  text[] not null,                              -- 所有关联 fine_unit 的原始释义
   constraint coarse_unit_kind_check check (

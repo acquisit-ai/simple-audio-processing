@@ -103,5 +103,7 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-**/fine_unit_rows*
+**/fine_*
+**/coarse_*
 **/*.jsonl
+

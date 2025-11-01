@@ -2,8 +2,8 @@
 """
 Prepare prompts for converting fine-grained dictionary entries into coarse-grained ones.
 
-Reads fine_unit_rows_multiple.json, builds ChatGPT prompts for each [kind, label],
-and prints the first N prompts so they can be inspected before making real API calls.
+Reads fine_unit_rows_multiple.json, builds ChatGPT prompts for selected [kind, label]
+entries, and prints each prompt/response so they can be inspected before making real API calls.
 """
 
 from __future__ import annotations
@@ -40,8 +40,9 @@ JSON_SCHEMA = {
                         "chinese_def": {"type": "string"},
                         "chinese_criteria": {"type": "string"},
                         "chinese_label": {"type": "string"},
+                        "english_label": {"type": "string"},
                     },
-                    "required": ["ids", "pos", "english_def", "chinese_def", "chinese_criteria", "chinese_label"],
+                    "required": ["ids", "pos", "english_def", "chinese_def", "chinese_criteria", "chinese_label", "english_label"],
                 },
             }
         },
@@ -49,58 +50,74 @@ JSON_SCHEMA = {
     },
 }
 
+TARGET_WORD_LABELS = [
+    "orange",
+    "apple",
+    "significant",
+    "elephant",
+    "pornography",
+    "versatile",
+    "run",
+    "go",
+    "season",
+    "design",
+    "record",
+]
+
 INSTRUCTIONS = (
-    "You are a senior lexicographer. Your task is to aggregate fine‑grained dictionary senses into a small set of "
-    "learner‑oriented, coarse‑grained sense clusters.\n"
+    "You are a senior lexicographer. Your task is to aggregate fine-grained dictionary senses into a small set of "
+    "learner-oriented, coarse-grained clusters for **Chinese learners of English** (Simplified Chinese context).\n"
     "\n"
     "[INPUT]\n"
     "- The header line provides the headword: 'Fine-grained key: {kind}:{label}'.\n"
     "- You also receive a JSON array of fine senses; each item has: id (string), pos (string), def (string).\n"
-    "- Your job is to group these fine senses into a few clusters that are most helpful for learners, and output JSON "
-    "that matches the provided schema only.\n"
+    "- Group these fine senses into clusters that are most helpful for Chinese learners, and output JSON that matches the provided schema only.\n"
     "\n"
     "[HARD CONSTRAINTS]\n"
     "1) Coverage & exclusivity: Use every input id exactly once. Do not drop, duplicate, invent, or modify ids.\n"
-    "2) Single POS per cluster: Each cluster must have one pos only, and that pos must be one that actually appears among "
-    "its member senses (e.g., 'verb', 'noun', 'adjective', 'adverb'). If the headword spans multiple POS, create separate "
-    "clusters per POS.\n"
+    "2) Single POS per cluster: Each cluster must have one pos only, and that pos must be present among its member senses "
+    "(e.g., 'verb', 'noun', 'adjective', 'adverb'). If the headword spans multiple POS, create separate clusters per POS.\n"
     "3) JSON only: Return JSON that matches the given schema; do not add any extra text, explanations, or reasoning.\n"
+    "4) chinese_criteria policy: chinese_criteria **must be written in Simplified Chinese** and is for **internal auditing only** "
+    "(not learner-facing). Do **not** put examples, collocations, or teaching tips there. Put usage/collocation cues in english_def and/or chinese_def instead.\n"
     "\n"
-    "[LEARNER‑CENTRIC GOALS]\n"
-    "- The goal is not to replicate tiny dictionary distinctions but to produce a few clear, teachable uses.\n"
-    "- Ensure learners can easily tell clusters apart and map them to real usage (collocations, arguments, contexts).\n"
-    "- There is no hard limit on the number of clusters, but avoid unnecessary splits; each cluster should present a clear, "
-    "practical usage boundary.\n"
-    "- Order clusters by teaching priority: core/high‑frequency → common extensions → domain‑specific/rare.\n"
+    "[LEARNER-CENTRIC GOALS]\n"
+    "- Audience is Chinese learners. The goal is not to replicate tiny dictionary distinctions but to produce a few clear, teachable uses.\n"
+    "- Ensure clusters are easy to tell apart and map to real usage (collocations, arguments, contexts) reflected in the defs.\n"
+    "- No fixed limit on cluster count, but avoid unnecessary splits; each cluster should present a clear, practical usage boundary.\n"
+    "- Teaching order: list clusters by priority — core/high-frequency → common extensions → domain-specific/rare.\n"
+    "- **Consolidation rule for Chinese learners:** If two candidate clusters share the **same POS** and would receive **near-identical chinese_label** "
+    "(i.e., the same Chinese concept for learners), **prefer merging them into a single cluster**. Represent the minor variations inside the english_def/chinese_def "
+    "as usage notes or sub-variants, rather than creating separate clusters. Split only when collocations/argument patterns diverge in ways that would cause learner errors.\n"
     "\n"
     "[CLUSTERING PRINCIPLES (IN PRIORITY ORDER)]\n"
     "A) Semantic frame & argument structure: Group senses that share the same event/frame and similar argument patterns "
-    "(typical objects, prepositions, who‑does‑what‑to‑what).\n"
-    "B) Literal vs figurative: Split literal/physical meanings from figurative/abstract ones when collocations or syntax "
-    "differ; merge only if learner usage is essentially the same.\n"
-    "C) Domain‑specific uses: Create dedicated clusters for finance/legal/technical uses to aid quick recognition.\n"
-    "D) Same usage, small differences: Merge senses that differ only in intensity/register/style but share the same usage.\n"
-    "E) Process vs result; causative vs state: If they are interchangeable for learners with the same patterns, they may "
-    "be merged; if likely to cause misuse, split them.\n"
+    "(typical objects, prepositions, who-does-what-to-what).\n"
+    "B) Literal vs figurative: Split literal/physical meanings from figurative/abstract ones when collocations or syntax differ; "
+    "merge only if learner usage is essentially the same.\n"
+    "C) Domain-specific uses: Create dedicated clusters for finance/legal/technical uses to aid quick recognition.\n"
+    "D) Same usage, small differences: Merge senses that differ only in intensity/register/style but share the same usage pattern.\n"
+    "E) Process vs result; causative vs state: Merge when interchangeable for learners with the same patterns; split if the difference affects usage and error risk.\n"
     "\n"
-    "[GUIDANCE FOR FILLING FIELDS (HIGH FLEXIBILITY)]\n"
-    "- english_def / chinese_def: Write learner‑facing paraphrases (do not copy the input defs). You may include helpful cues "
-    "such as typical collocations, common objects, or scenarios. Keep english_def in English and chinese_def in Simplified Chinese.\n"
-    "- chinese_label: A memorable Chinese label that captures the cluster’s core use (for flashcard‑style learning).\n"
-    "- chinese_criteria: Provide cues that help decide membership—e.g., inclusion/exclusion hints, typical "
-    "collocations, argument hints, replaceable synonyms—use any style that best serves learning.\n"
-    "- ids / pos: Fill according to the schema. No ordering requirements are imposed.\n"
+    "[GUIDANCE FOR FILLING FIELDS]\n"
+    "- english_def / chinese_def: Write learner-facing paraphrases (do not copy input defs). Include helpful usage cues such as "
+    "typical collocations, common objects, argument structure, or scenarios. Keep english_def in English and chinese_def in Simplified Chinese.\n"
+    "- chinese_label: A memorable Chinese label capturing the cluster’s core use (flashcard-friendly for Chinese learners).\n"
+    "- english_label: An English label aligned with chinese_label that captures the same core use (for cross-language tagging).\n"
+    "- chinese_criteria: Write in Simplified Chinese **for internal reviewers only**. Provide decision cues that help verify "
+    "membership/boundaries (e.g., inclusion/exclusion heuristics, diagnostic hints). Avoid examples, collocations, or learner-facing tips; "
+    "do not use English here.\n"
+    "- ids / pos: Fill according to the schema.\n"
     "\n"
     "[CONFLICT RESOLUTION]\n"
     "- Assign a borderline sense to the cluster that maximizes contrast between clusters and reduces learner confusion.\n"
-    "- If a sense spans multiple frames, prefer the more common and transferable frame for learners unless the input clearly "
-    "indicates otherwise.\n"
-    "- When collocations/arguments strongly point to a cluster, treat that as primary evidence.\n"
+    "- If a sense spans multiple frames, prefer the more common and transferable frame for Chinese learners unless the input clearly indicates otherwise.\n"
+    "- When collocations/arguments strongly indicate a cluster, treat that as primary evidence (present these cues in defs, not in chinese_criteria).\n"
     "\n"
-    "[SELF‑CHECK (DO NOT OUTPUT)]\n"
+    "[SELF-CHECK (DO NOT OUTPUT)]\n"
     "- All ids are covered exactly once; no cluster mixes POS.\n"
-    "- Clusters are distinguishable by collocations/arguments/contexts, not just wording.\n"
-    "- Definitions are learner‑facing and readily usable in real production.\n"
+    "- Clusters are distinguishable by collocations/arguments/contexts (reflected in english_def/chinese_def), not just wording.\n"
+    "- chinese_criteria is in Simplified Chinese, internal-audit-oriented, and free of examples/collocations/teaching tips.\n"
 )
 
 
@@ -220,10 +237,13 @@ def parse_args() -> argparse.Namespace:
         help="Path to the .env file holding OPENAI_API_KEY (default: .env)",
     )
     parser.add_argument(
-        "--example-key",
-        type=str,
-        default="[word, abstract]",
-        help="Key to preview in the output (default: [word, abstract])",
+        "--labels",
+        nargs="+",
+        default=TARGET_WORD_LABELS,
+        help=(
+            "Word labels to process (kind fixed to 'word'). "
+            "Default: orange apple significant elephant pornography versatile run go season design record"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -248,63 +268,67 @@ def main() -> None:
     with args.input.open(encoding="utf-8") as handle:
         data: dict[str, list[dict[str, str]]] = json.load(handle)
 
-    target_key = args.example_key
-    rows = data.get(target_key)
-    if rows is None:
-        print(f"No entry found for key {target_key!r}")
-        return
-
-    prompt, rows_payload = build_prompt(target_key, rows)
-    print(f"--- Prompt for {target_key} ---")
-    print("Instructions:")
-    print(INSTRUCTIONS)
-    print()
-    print("Input:")
-    print(prompt)
-    print()
-
     client = OpenAI()
-    try:
-        parsed = call_openai_with_retry(
-            client,
-            instructions=INSTRUCTIONS,
-            prompt=prompt,
-            json_schema=JSON_SCHEMA,
-        )
-    except Exception as exc:
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.failed_output.parent.mkdir(parents=True, exist_ok=True)
+
+    for label in args.labels:
+        key = f"[word, {label}]"
+        rows = data.get(key)
+        if rows is None:
+            print(f"!!! Skipping {key}: not found in input JSON.")
+            continue
+
+        prompt, rows_payload = build_prompt(key, rows)
+        print(f"=== Prompt for {key} ===")
+        print("Instructions:")
+        print(INSTRUCTIONS)
+        print()
+        print("Input:")
+        print(prompt)
+        print()
+
+        try:
+            parsed = call_openai_with_retry(
+                client,
+                instructions=INSTRUCTIONS,
+                prompt=prompt,
+                json_schema=JSON_SCHEMA,
+            )
+        except Exception as exc:
+            print("--- Model Response ---")
+            print(f"OpenAI call failed after retries: {exc}")
+            original_kind, original_label = parse_key(key)
+            failure_record = {
+                "kind": original_kind,
+                "label": original_label,
+                "error": {
+                    "type": exc.__class__.__name__,
+                    "message": str(exc),
+                },
+                "rows": rows_payload,
+            }
+            with args.failed_output.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(failure_record, ensure_ascii=False))
+                handle.write("\n")
+            print(f"(Logged failure to {args.failed_output})")
+            print()
+            continue
+
         print("--- Model Response ---")
-        print(f"OpenAI call failed after retries: {exc}")
-        original_kind, original_label = parse_key(target_key)
-        failure_record = {
+        original_kind, original_label = parse_key(key)
+        enriched = {
             "kind": original_kind,
             "label": original_label,
-            "error": {
-                "type": exc.__class__.__name__,
-                "message": str(exc),
-            },
-            "rows": rows_payload,
+            **parsed,
         }
-        args.failed_output.parent.mkdir(parents=True, exist_ok=True)
-        with args.failed_output.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(failure_record, ensure_ascii=False))
+        print(json.dumps(enriched, ensure_ascii=False, indent=2))
+        with args.output.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(enriched, ensure_ascii=False))
             handle.write("\n")
-        print(f"(Logged failure to {args.failed_output})")
-        return
-
-    print("--- Model Response ---")
-    original_kind, original_label = parse_key(target_key)
-    enriched = {
-        "kind": original_kind,
-        "label": original_label,
-        **parsed,
-    }
-    print(json.dumps(enriched, ensure_ascii=False, indent=2))
-    # Append to JSON Lines file for accumulation across runs.
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(enriched, ensure_ascii=False))
-        handle.write("\n")
-    print(f"(Appended to {args.output})")
+        print(f"(Appended to {args.output})")
+        print()
 
 
 if __name__ == "__main__":
