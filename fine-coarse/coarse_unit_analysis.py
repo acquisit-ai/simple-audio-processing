@@ -316,8 +316,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=10,
-        help="Max number of parallel threads (default: 10). Tune to match API rate limits.",
+        default=40,
+        help="Max number of parallel threads (default: 40). Tune to match API rate limits.",
     )
     parser.add_argument(
         "--timeout",

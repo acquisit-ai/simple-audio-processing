@@ -296,8 +296,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=10,
-        help="Number of worker threads (default: 10).",
+        default=40,
+        help="Number of worker threads (default: 40).",
     )
     parser.add_argument(
         "--timeout",
