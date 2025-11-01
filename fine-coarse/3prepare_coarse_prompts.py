@@ -11,10 +11,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List, Dict
 
 from openai import OpenAI
+from openai import APIError, APITimeoutError
 
 JSON_SCHEMA = {
     "type": "json_schema",
@@ -36,8 +38,10 @@ JSON_SCHEMA = {
                         "pos": {"type": "string"},
                         "english_def": {"type": "string"},
                         "chinese_def": {"type": "string"},
+                        "chinese_criteria": {"type": "string"},
+                        "chinese_label": {"type": "string"},
                     },
-                    "required": ["ids", "pos", "english_def", "chinese_def"],
+                    "required": ["ids", "pos", "english_def", "chinese_def", "chinese_criteria", "chinese_label"],
                 },
             }
         },
@@ -46,9 +50,28 @@ JSON_SCHEMA = {
 }
 
 INSTRUCTIONS = (
-    "You are an expert lexicographer helping transform fine-grained dictionary entries into coarse-grained ones. "
-    "Group related senses together, choose an appropriate coarse part of speech, and provide concise explanations "
-    "in both English and Chinese. Respond strictly in JSON that matches the provided schema."
+    "You are an expert lexicographer converting fine-grained dictionary senses into a coarser taxonomy.\n"
+    "Follow these rules:\n"
+    "1. Cluster senses that share a common meaning or usage context. If two senses differ semantically, keep them separate.\n"
+    "2. Select one coarse part of speech that best fits each cluster. Prefer the dominant POS; if mixed, use the POS that captures the shared sense.\n"
+    "3. Provide concise explanations in English and Chinese describing the cluster-level meaning (not individual senses).\n"
+    "4. Supply a short Chinese label (直译或概括) summarising the cluster.\n"
+    "5. Provide a short chinese_criteria note (in Chinese) explaining the inclusion/exclusion rationale for that cluster.\n"
+    "6. Respond strictly in JSON matching the provided schema.\n"
+    "\n"
+    "Example (illustrative only):\n"
+    "{\n"
+    "  \"coarse_senses\": [\n"
+    "    {\n"
+    "      \"ids\": [\"1001\", \"1002\"],\n"
+    "      \"pos\": \"noun\",\n"
+    "      \"english_def\": \"A handheld computing device such as a smartphone or tablet.\",\n"
+    "      \"chinese_def\": \"手持式计算设备，如智能手机或平板电脑。\",\n"
+    "      \"chinese_criteria\": \"包含指代实体设备的释义；排除表示'打电话'等动词用法。\",\n"
+    "      \"chinese_label\": \"掌上设备\"\n"
+    "    }\n"
+    "  ]\n"
+    "}"
 )
 
 
@@ -78,10 +101,9 @@ def parse_key(key: str) -> tuple[str, str]:
     return kind, label
 
 
-def build_prompt(key: str, rows: Iterable[dict[str, str]]) -> str:
+def build_prompt(key: str, rows: Iterable[dict[str, str]]) -> tuple[str, List[Dict[str, str]]]:
     """Construct the message that will be sent to ChatGPT."""
     kind, label = parse_key(key)
-    display_kind = kind.split("_", 1)[0] if "_" in kind else kind
     rows_payload = [
         {
             "id": row.get("id", ""),
@@ -92,12 +114,64 @@ def build_prompt(key: str, rows: Iterable[dict[str, str]]) -> str:
     ]
     rows_text = json.dumps(rows_payload, ensure_ascii=False, indent=2)
     prompt = (
-        f"Fine-grained key: {display_kind}:{label}\n"
+        f"Fine-grained key: {kind}:{label}\n"
         "Each entry includes an id, part of speech, and definition.\n"
-        "Entries (JSON array):\n"
         f"{rows_text}\n"
     )
-    return prompt
+    return prompt, rows_payload
+
+
+def call_openai_with_retry(
+    client: OpenAI,
+    *,
+    instructions: str,
+    prompt: str,
+    json_schema: dict[str, object],
+    timeout: float | None = None,
+    additional_retry: int = 1,
+) -> dict[str, object]:
+    """
+    Call OpenAI Responses API with one extra manual retry beyond the SDK defaults.
+
+    Parameters
+    ----------
+    client:
+        Configured OpenAI client.
+    instructions:
+        System-level instructions passed via `instructions=`.
+    prompt:
+        User input payload.
+    json_schema:
+        JSON schema dict passed to `text={"format": ...}`.
+    timeout:
+        Optional per-request timeout in seconds.
+    additional_retry:
+        Extra retry attempts on top of the SDK automatic retries (default: 1).
+    """
+
+    attempts = additional_retry + 1
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        try:
+            response = client.responses.create(
+                model="gpt-5-mini",
+                instructions=instructions,
+                input=prompt,
+                text={"format": json_schema},
+                service_tier="flex",
+                timeout=timeout,
+            )
+            return json.loads(response.output_text)
+        except (APIError, APITimeoutError, TimeoutError) as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            # Brief pause to give the SDK time before retrying.
+            time.sleep(1 + attempt)
+
+    assert last_error is not None
+    raise last_error
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,6 +202,12 @@ def parse_args() -> argparse.Namespace:
         default=Path("fine-coarse") / "coarse_senses.jsonl",
         help="Path to append JSON lines with model outputs (default: fine-coarse/coarse_senses.jsonl)",
     )
+    parser.add_argument(
+        "--failed-output",
+        type=Path,
+        default=Path("fine-coarse") / "coarse_senses_failed.jsonl",
+        help="Path to append JSON lines when calls fail (default: fine-coarse/coarse_senses_failed.jsonl)",
+    )
     return parser.parse_args()
 
 
@@ -145,7 +225,7 @@ def main() -> None:
         print(f"No entry found for key {target_key!r}")
         return
 
-    prompt = build_prompt(target_key, rows)
+    prompt, rows_payload = build_prompt(target_key, rows)
     print(f"--- Prompt for {target_key} ---")
     print("Instructions:")
     print(INSTRUCTIONS)
@@ -155,33 +235,47 @@ def main() -> None:
     print()
 
     client = OpenAI()
-    response = client.responses.create(
-        model="gpt-5-mini",
-        instructions=INSTRUCTIONS,
-        input=prompt,
-        text={"format": JSON_SCHEMA},
-        service_tier="priority",
-    )
-
-    print("--- Model Response ---")
     try:
-        parsed = json.loads(response.output_text)
-    except json.JSONDecodeError:
-        print(response.output_text.strip())
-    else:
+        parsed = call_openai_with_retry(
+            client,
+            instructions=INSTRUCTIONS,
+            prompt=prompt,
+            json_schema=JSON_SCHEMA,
+        )
+    except Exception as exc:
+        print("--- Model Response ---")
+        print(f"OpenAI call failed after retries: {exc}")
         original_kind, original_label = parse_key(target_key)
-        enriched = {
+        failure_record = {
             "kind": original_kind,
             "label": original_label,
-            **parsed,
+            "error": {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+            },
+            "rows": rows_payload,
         }
-        print(json.dumps(enriched, ensure_ascii=False, indent=2))
-        # Append to JSON Lines file for accumulation across runs.
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with args.output.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(enriched, ensure_ascii=False))
+        args.failed_output.parent.mkdir(parents=True, exist_ok=True)
+        with args.failed_output.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(failure_record, ensure_ascii=False))
             handle.write("\n")
-        print(f"(Appended to {args.output})")
+        print(f"(Logged failure to {args.failed_output})")
+        return
+
+    print("--- Model Response ---")
+    original_kind, original_label = parse_key(target_key)
+    enriched = {
+        "kind": original_kind,
+        "label": original_label,
+        **parsed,
+    }
+    print(json.dumps(enriched, ensure_ascii=False, indent=2))
+    # Append to JSON Lines file for accumulation across runs.
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(enriched, ensure_ascii=False))
+        handle.write("\n")
+    print(f"(Appended to {args.output})")
 
 
 if __name__ == "__main__":
