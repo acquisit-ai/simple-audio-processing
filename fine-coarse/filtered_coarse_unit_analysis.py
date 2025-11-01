@@ -77,6 +77,29 @@ JSON_SCHEMA = {
     },
 }
 
+TARGET_WORD_LABELS = [
+    "orange",
+    "apple",
+    "significant",
+    "elephant",
+    "pornography",
+    "versatile",
+    "season",
+    "design",
+    "record",
+    "eulogy",
+    "saline",
+    "credulous",
+    "fantastic",
+]
+# ---------------------------------------------------------------------------
+# 发送给模型的系统级指令说明
+# ---------------------------------------------------------------------------
+# 说明：
+# - 初段说明任务目标；
+# - [INPUT]/[HARD CONSTRAINTS]/[LEARNER-CENTRIC GOALS] 等分区详述要求；
+# - 明确约束：覆盖全部 id、每个聚合仅包含单一 POS、仅返回 JSON；
+# - 提供聚合原则、释义撰写建议、冲突解决策略与自检要点；尽量避免模型输出偏离主题。
 INSTRUCTIONS = (
     "You are a senior lexicographer. Aggregate fine-grained dictionary senses into a small set of "
     "learner-oriented, coarse-grained clusters for **Chinese learners of English** (Simplified Chinese context).\n"
@@ -354,7 +377,27 @@ def main() -> None:
             print(f"No entry found for key {args.only_key!r}")
             return
     else:
+        # dict 在 Python 3.7+ 默认保持插入顺序，直接 list() 即可
         keys = list(data.keys())
+        # 只保留目标词列表中的 word 条目，保持原顺序
+        target_set = {label.lower() for label in TARGET_WORD_LABELS}
+        filtered_keys: List[str] = []
+        for key in keys:
+            try:
+                kind, label = parse_key(key)
+            except ValueError:
+                continue
+            if kind == "word" and label.lower() in target_set:
+                filtered_keys.append(key)
+        if not filtered_keys:
+            print("No matching word entries found for the target label list.")
+            return
+        # 提醒哪些目标缺失
+        existing_labels = {parse_key(k)[1].lower() for k in filtered_keys}
+        missing = [label for label in TARGET_WORD_LABELS if label.lower() not in existing_labels]
+        if missing:
+            print("Warning: missing labels in input JSON:", ", ".join(missing))
+        keys = filtered_keys
 
     # 4. limit 参数用于快速抽样或断点续跑，避免一次跑完整个数据集
     if args.limit is not None:

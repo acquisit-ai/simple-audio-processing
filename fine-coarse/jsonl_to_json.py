@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-Convert a JSON Lines file into a standard JSON array file.
+Convert JSON Lines files into standard JSON array files.
 
-Reads `coarse_senses.jsonl` (or any provided path), parses each line as JSON,
-and writes the aggregated list to a `.json` file.
+By default this script checks for coarse_senses.jsonl and coarse_senses_stage2.jsonl
+under fine-coarse/. For every JSONL file that exists, it writes a JSON file with the
+same stem (coarse_senses.json, coarse_senses_stage2.json). Non-existent files are
+silently skipped.
 """
-
-from __future__ import annotations
 
 import argparse
 import json
@@ -15,35 +16,41 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert a JSONL file into a JSON array file."
+        description="Convert JSONL files into JSON array files."
     )
     parser.add_argument(
-        "--input",
-        type=Path,
-        default=Path("fine-coarse") / "coarse_senses.jsonl",
-        help="Source JSON Lines file (default: fine-coarse/coarse_senses.jsonl)",
+        "--inputs",
+        nargs="*",
+        default=[
+            Path("fine-coarse") / "coarse_senses.jsonl",
+            Path("fine-coarse") / "coarse_senses_stage2.jsonl",
+        ],
+        help=(
+            "JSONL files to convert. Default checks coarse_senses.jsonl and "
+            "coarse_senses_stage2.jsonl in fine-coarse/."
+        ),
     )
     parser.add_argument(
-        "--output",
+        "--output-dir",
         type=Path,
-        default=Path("fine-coarse") / "coarse_senses.json",
-        help="Destination JSON file (default: fine-coarse/coarse_senses.json)",
+        default=Path("fine-coarse"),
+        help="Directory to write JSON outputs (default: fine-coarse/).",
     )
     return parser.parse_args()
 
 
 def read_jsonl(path: Path) -> list[object]:
-    items: list[object] = []
+    data: list[object] = []
     with path.open(encoding="utf-8") as handle:
         for line_no, line in enumerate(handle, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                items.append(json.loads(line))
+                data.append(json.loads(line))
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSON on line {line_no} of {path}") from exc
-    return items
+    return data
 
 
 def write_json(data: list[object], path: Path) -> None:
@@ -55,9 +62,22 @@ def write_json(data: list[object], path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    entries = read_jsonl(args.input)
-    write_json(entries, args.output)
-    print(f"Wrote {len(entries)} entries to {args.output}")
+    processed = 0
+
+    for input_path in args.inputs:
+        input_path = Path(input_path)
+        if not input_path.exists():
+            continue
+
+        entries = read_jsonl(input_path)
+        output_path = args.output_dir / (input_path.stem + ".json")
+        write_json(entries, output_path)
+
+        processed += 1
+        print(f"Converted {input_path} -> {output_path} ({len(entries)} entries)")
+
+    if processed == 0:
+        print("No JSONL files found; nothing converted.")
 
 
 if __name__ == "__main__":
