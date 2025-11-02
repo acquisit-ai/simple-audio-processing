@@ -284,14 +284,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("fine-coarse") / "coarse_senses_stage2.jsonl",
-        help="Append refined JSON lines (default: fine-coarse/coarse_senses_stage2.jsonl)",
+        default=Path("fine-coarse") / "fine_unit_multiple.jsonl",
+        help="Append refined JSON lines (default: fine-coarse/fine_unit_multiple.jsonl)",
     )
     parser.add_argument(
         "--failed-output",
         type=Path,
-        default=Path("fine-coarse") / "coarse_senses_stage2_failed.jsonl",
-        help="Append failures for later inspection (default: fine-coarse/coarse_senses_stage2_failed.jsonl)",
+        default=Path("fine-coarse") / "fine_unit_multiple_failed.jsonl",
+        help="Append failures for later inspection (default: fine-coarse/fine_unit_multiple_failed.jsonl)",
     )
     parser.add_argument(
         "--workers",
