@@ -234,8 +234,6 @@ def process_entry(
         enriched: Dict[str, object] = {
             "kind": kind,
             "label": label,
-            "version": entry.get("version", 1) + 1,
-            "previous_version": entry.get("version", 1),
             **parsed,
         }
         return index, "ok", enriched
@@ -243,7 +241,6 @@ def process_entry(
         failure = {
             "kind": kind,
             "label": label,
-            "version": entry.get("version", 1),
             "error": {
                 "type": exc.__class__.__name__,
                 "message": str(exc),

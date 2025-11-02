@@ -17,75 +17,66 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from openai import APIError, APITimeoutError, OpenAI
 
 
-JSON_SCHEMA = {
-    "type": "json_schema",
-    "name": "single_entry_learning_content",
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "learning_items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "id": {"type": "string"},
-                        "pos": {"type": "string"},
-                        "english_label": {"type": "string"},
-                        "chinese_label": {"type": "string"},
-                        "english_def": {"type": "string"},
-                        "chinese_def": {"type": "string"},
-                    },
-                    "required": [
-                        "id",
-                        "pos",
-                        "english_label",
-                        "chinese_label",
-                        "english_def",
-                        "chinese_def",
-                    ],
-                },
-            }
-        },
-        "required": ["learning_items"],
-    },
+INSTRUCTIONS = (
+    "You are an experienced bilingual lexicographer who writes learning materials for native Chinese speakers learning English.\n"
+    "\n"
+    "[Input]\n"
+    "- The entry key is provided in the form \"Fine-grained key: {kind}:{label}\".\n"
+    "- A fine-grained English sense of a word/phrase/grammar item is provided with the fields: id (string), pos (part-of-speech string), def (English definition).\n"
+    "- Field 'pattern': leave this empty if the entry is a word or phrase; if the entry is a grammar item, this field gives common syntactic patterns or collocation cues.\n"
+    "\n"
+    "[Task]\n"
+    "- Turn this sense into bilingual content for Chinese-native English learners. Do not fabricate or add extra senses.\n"
+    "- Return exactly one learning item, formatted as a flat JSON object containing the specified fields.\n"
+    "\n"
+    "[Hard Constraints]\n"
+    "1) Output only a JSON object, and include only these fields: 'id', 'pos', 'english_label', 'chinese_label', 'chinese_def', 'english_def'.\n"
+    "2) Preserve semantic fidelity; do not alter the original sense.\n"
+    "3) 'id' and 'pos' must exactly match the input.\n"
+    "4) All Chinese text must use Simplified Chinese.\n"
+    "5) Do not add any extra keys, such as 'usage_tips', 'example_sentence', or 'example_translation'.\n"
+    "\n"
+    "[Field Descriptions]\n"
+    "- english_label: a concise English paraphrase or near-synonymous phrase; do not include the headword itself, brackets, or extra punctuation.\n"
+    "- chinese_label: at least provide a literal Chinese translation. You may optionally add a brief core-meaning summary to aid memorization.\n"
+    "- chinese_def: the core field for learning—a full Chinese explanation of the sense. You may naturally weave in typical collocations, common objects, common scenarios, or syntactic pattern tips. It can be slightly more detailed as needed.\n"
+    "- english_def: an English explanation aligned with chinese_def, mirroring its meaning and key usage cues.\n"
+    "\n"
+    "[Style & Quality]\n"
+    "- Be learner-centered and focused on language learning; explanations must be clear and easy to understand.\n"
+    "- Provide sufficient information without being verbose.\n"
+)
+
+
+OUTPUT_TEMPLATE = {
+    "id": "<string>",
+    "pos": "<string>",
+    "english_label": "<string>",
+    "chinese_label": "<string>",
+    "english_def": "<string>",
+    "chinese_def": "<string>",
 }
 
 
-INSTRUCTIONS = (
-    "You are an experienced bilingual lexicographer creating learner-facing content for Chinese learners of English.\n"
-    "\n"
-    "[INPUT]\n"
-    "- The headword is given by 'Fine-grained key: {kind}:{label}'.\n"
-    "- One fine-grained sense is provided with fields: id (string), pos (string), def (English). Other fields may appear but are not required.\n"
-    "\n"
-    "[TASK]\n"
-    "- Convert this single sense into learner-ready, bilingual content without inventing new senses.\n"
-    "- Produce exactly one learning item in the 'learning_items' array.\n"
-    "\n"
-    "[HARD CONSTRAINTS]\n"
-    "1) JSON only: Return a JSON object that matches the provided schema exactly; include only the required fields "
-    "('id', 'pos', 'english_label', 'chinese_label', 'english_def', 'chinese_def').\n"
-    "2) Fidelity: Do not add or alter senses; stay faithful to the given definition.\n"
-    "3) Identity: Copy 'id' and 'pos' from the input exactly (id is a string).\n"
-    "4) Language: Use Simplified Chinese for all Chinese text.\n"
-    "5) No extra keys: Do NOT output 'usage_tips', 'example_sentence', or 'example_translation'.\n"
-    "\n"
-    "[FIELD GUIDANCE]\n"
-    "- english_label: A short English gloss/near-synonym as a bare phrase (no headword, no parentheses, no extra punctuation).\n"
-    "- chinese_label: A concise Simplified Chinese label that captures the core idea for learners.\n"
-    "- english_def: A learner-friendly paraphrase in English that highlights the core idea and, when useful, briefly signals typical usage "
-    "(e.g., common objects/prepositions or argument patterns) within the sentence.\n"
-    "- chinese_def: A clear Simplified Chinese explanation aligned with the English definition. Here you may **slightly expand** to include practical cues "
-    "for learners—typical collocations, common objects/prepositions, productive patterns, and brief scenario hints—integrated naturally into the prose "
-    "(do not add extra fields).\n"
-    "\n"
-    "[STYLE & QUALITY]\n"
-    "- Learner-first: Emphasize how it is used in real language; prefer plain English and clear Simplified Chinese.\n"
-    "- Keep it compact but informative; avoid heavy jargon and rare vocabulary.\n"
-    "- Ensure english_def and chinese_def remain semantically aligned."
-)
+def validate_output(payload: Dict[str, object]) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("Response is not a JSON object.")
+
+    required_fields = {
+        "id",
+        "pos",
+        "english_label",
+        "chinese_label",
+        "english_def",
+        "chinese_def",
+    }
+    if set(payload.keys()) != required_fields:
+        raise ValueError("Response must contain only the required fields.")
+
+    for field in required_fields:
+        value = payload.get(field)
+        if not isinstance(value, str):
+            raise ValueError(f"Field '{field}' must be a string.")
 
 
 def load_api_key(env_path: Path) -> Optional[str]:
@@ -118,14 +109,20 @@ def build_prompt(key: str, rows: Iterable[Dict[str, str]]) -> Tuple[str, Dict[st
         "id": row.get("id", ""),
         "pos": row.get("pos", ""),
         "def": row.get("def", ""),
+        "pattern": row.get("pattern", ""),
         "lang": row.get("lang", ""),
         "status": row.get("status", ""),
     }
     payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    template_text = json.dumps(OUTPUT_TEMPLATE, ensure_ascii=False, indent=2)
     prompt = (
         f"Fine-grained key: {kind}:{label}\n"
         "Single sense (JSON object):\n"
         f"{payload_text}\n"
+        "\n"
+        "Output a JSON object that matches the structure below exactly. Replace the placeholder values with real content while keeping the keys.\n"
+        "Return JSON only—no explanations, comments, or extra keys.\n"
+        f"{template_text}\n"
     )
     return prompt, payload
 
@@ -134,26 +131,50 @@ def call_openai_with_retry(
     *,
     instructions: str,
     prompt: str,
-    json_schema: Dict[str, object],
     timeout: Optional[float] = None,
     retries: int = 1,
 ) -> Dict[str, object]:
     attempts = retries + 1
     last_error: Optional[Exception] = None
+    client = OpenAI(base_url="https://api.just2chat.cn/v1")
 
     for attempt in range(attempts):
         try:
-            client = OpenAI()
-            response = client.responses.create(
-                model="gpt-5-mini",
-                instructions=instructions,
-                input=prompt,
-                text={"format": json_schema},
-                service_tier="flex",
+            response = client.chat.completions.create(
+                model="Qwen3-30B-A3B-Instruct-2507",
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": prompt},
+                ],
                 timeout=timeout,
             )
-            return json.loads(response.output_text)
-        except (APIError, APITimeoutError, TimeoutError, json.JSONDecodeError) as exc:
+            message = response.choices[0].message
+            if hasattr(message, "content"):
+                content = message.content
+            else:
+                content = response.choices[0].text  # Legacy compatibility
+
+            if isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        text_parts.append(part.get("text", ""))
+                    else:
+                        text_parts.append(str(part))
+                raw_text = "".join(text_parts)
+            else:
+                raw_text = str(content)
+
+            parsed = json.loads(raw_text)
+            validate_output(parsed)
+            return parsed
+        except (
+            APIError,
+            APITimeoutError,
+            TimeoutError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
             last_error = exc
             if attempt == attempts - 1:
                 break
@@ -169,7 +190,6 @@ def process_entry(
     rows: List[Dict[str, str]],
     *,
     instructions: str,
-    json_schema: Dict[str, object],
     timeout: Optional[float],
     retries: int,
 ) -> Tuple[int, str, Dict[str, object]]:
@@ -179,7 +199,6 @@ def process_entry(
         parsed = call_openai_with_retry(
             instructions=instructions,
             prompt=prompt,
-            json_schema=json_schema,
             timeout=timeout,
             retries=retries,
         )
@@ -224,7 +243,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=10,
+        default=None,
         help="Optionally limit to the first N keys (after applying --only-key).",
     )
     parser.add_argument(
@@ -254,8 +273,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--retries",
         type=int,
-        default=1,
-        help="Extra retry attempts beyond SDK defaults (default: 1).",
+        default=10,
+        help="Extra retry attempts beyond SDK defaults (default: 10).",
     )
     return parser.parse_args()
 
@@ -299,7 +318,6 @@ def main() -> None:
                     key,
                     rows,
                     instructions=INSTRUCTIONS,
-                    json_schema=JSON_SCHEMA,
                     timeout=args.timeout,
                     retries=args.retries,
                 )

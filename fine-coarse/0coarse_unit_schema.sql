@@ -15,7 +15,6 @@ create table if not exists semantic.coarse_unit (
   label          text not null,                                -- 粗粒度标签
   lang           text not null default 'en',                   -- 语言
   pos            text,                                         -- 粗粒度词性
-  def            text,                                         -- 可选通用释义（保持与原表结构一致）
   english_def    text,                                         -- 粗粒度英文解释
   chinese_def    text,                                         -- 粗粒度中文解释
   chinese_criteria text,                                       -- 中文判据说明（包含/排除的依据）
@@ -29,7 +28,7 @@ create table if not exists semantic.coarse_unit (
   fine_unit_ids  bigint[] not null,                            -- 关联的细粒度 fine_unit.id 列表
   original_defs  text[] not null,                              -- 所有关联 fine_unit 的原始释义
   constraint coarse_unit_kind_check check (
-    kind = any (array['word_sense','phrase_sense','grammar_rule'])
+    kind = any (array['word','phrase','grammar'])
   )
 ) tablespace pg_default;
 
