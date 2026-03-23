@@ -70,7 +70,7 @@ def main(audio_file="./original-media/3min1.mp3"):
         # 步骤2: 数据清理
         print("\n步骤2: 清理和结构化数据...")
         print("-" * 50)
-        data_cleansing_module.process_whisperx_to_cleaned(whisper_output, cleaned_output)
+        data_cleansing_module.process_assemblyai_to_cleaned(whisper_output, cleaned_output)
         print(f"✓ 清理后的数据已保存: {cleaned_output}")
 
         # 步骤3: LLM分析

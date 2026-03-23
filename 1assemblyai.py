@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 import json
 import os
-from pathlib import Path
 
 import assemblyai as aai
 from dotenv import load_dotenv
@@ -153,28 +152,57 @@ def run_assemblyai_with_local_file(local_audio_path, output_path=None):
     print(f"\n输出文件: {output_json_path}")
     print("  ✓ 目录已创建/确认")
 
-    result = save_assemblyai_result(transcript, output_json_path)
-    return result, output_json_path
+    merged_result = save_assemblyai_result(transcript, output_json_path)
+    return merged_result, output_json_path
+
+
+def _save_json(data, output_json_path):
+    """将 JSON 数据保存到文件。"""
+    output_dir = os.path.dirname(output_json_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_json_path, "w", encoding="utf-8") as output_file:
+        json.dump(data, output_file, ensure_ascii=False, indent=2)
+
+
+def _fetch_sentences_payload(transcript):
+    """获取句子级结果，并转换为可写入 JSON 的 Python 数据。"""
+    sentences = transcript.get_sentences()
+    return [_to_serializable(sentence) for sentence in sentences]
+
+
+def merge_transcript_result(main_result, sentences_payload):
+    """
+    合并主 transcript JSON 和句子级结果：
+    - 保留主 transcript JSON
+    - 删除主 JSON 中的 words 字段
+    - 将句子级结果合并到 sentences 字段
+    """
+    result = dict(main_result or {})
+    result.pop("words", None)
+    result["sentences"] = list(sentences_payload or [])
+    return result
+
+
+def _build_merged_result(transcript):
+    """从 Transcript 对象构建合并后的输出结构。"""
+    main_result = transcript.json_response or {}
+    sentences_payload = _fetch_sentences_payload(transcript)
+    return merge_transcript_result(main_result, sentences_payload)
 
 
 def save_assemblyai_result(transcript, output_json_path):
     """
-    保存 AssemblyAI 转写结果到 JSON 文件。
+    保存合并后的 AssemblyAI 转写结果到 JSON 文件。
 
     Args:
         transcript: AssemblyAI Transcript 对象
         output_json_path: 输出文件路径
     """
-
-    output_dir = os.path.dirname(output_json_path)
-    os.makedirs(output_dir, exist_ok=True)
-
-    result = transcript.json_response or {}
-    with open(output_json_path, "w", encoding="utf-8") as output_file:
-        json.dump(result, output_file, ensure_ascii=False, indent=2)
-
-    print(f"✓ JSON 文件已保存: {output_json_path}")
-    return result
+    merged_result = _build_merged_result(transcript)
+    _save_json(merged_result, output_json_path)
+    print(f"✓ 合并后的 JSON 文件已保存: {output_json_path}")
+    return merged_result
 
 
 def _to_serializable(item):
@@ -186,37 +214,13 @@ def _to_serializable(item):
     return item
 
 
-def save_sentence_export(transcript, output_json_path):
-    """
-    保存句子级导出结果。
-
-    Args:
-        transcript: AssemblyAI Transcript 对象
-        output_json_path: 主 JSON 输出路径
-    """
-
-    output_path = Path(output_json_path)
-    base_path = output_path.with_suffix("")
-
-    sentences = transcript.get_sentences()
-    sentences_payload = [_to_serializable(sentence) for sentence in sentences]
-    sentences_path = base_path.with_name(f"{base_path.name}-sentences.json")
-    with open(sentences_path, "w", encoding="utf-8") as output_file:
-        json.dump(sentences_payload, output_file, ensure_ascii=False, indent=2)
-    print(f"✓ 句子级 JSON 已保存: {sentences_path}")
-
-
 def main():
     # 直接使用固定的音频文件路径
     audio_path = "./resource/test.m4a"
     output_path = "1transcript-raw/test.json"
 
     try:
-        result, output_json_path = run_assemblyai_with_local_file(audio_path, output_path)
-
-        aai.settings.api_key = os.getenv("ASSEMBLYAI_API_KEY")
-        transcript = aai.Transcript.get_by_id(result["id"])
-        save_sentence_export(transcript, output_json_path)
+        result, _ = run_assemblyai_with_local_file(audio_path, output_path)
 
         print(f"\n结果摘要:")
         if isinstance(result, dict):
@@ -232,13 +236,13 @@ def main():
                 print(f"\n摘要预览:")
                 print(summary[:300] + ("..." if len(summary) > 300 else ""))
 
-            words = result.get("words") or []
-            if words:
-                print(f"\n前10个词级时间戳示例:")
-                for word in words[:10]:
-                    start = word.get("start")
-                    end = word.get("end")
-                    text_value = word.get("text")
+            sentences = result.get("sentences") or []
+            if sentences:
+                print(f"\n前3个句子级时间戳示例:")
+                for sentence in sentences[:3]:
+                    start = sentence.get("start")
+                    end = sentence.get("end")
+                    text_value = sentence.get("text")
                     print(f"  [{start}ms -> {end}ms] {text_value}")
 
         print(f"\n" + "=" * 60)

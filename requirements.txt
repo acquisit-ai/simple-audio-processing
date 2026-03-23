@@ -1,5 +1,4 @@
 # Core API clients
-replicate>=0.15.0
 google-genai>=0.6.0
 assemblyai>=0.58.0
 
