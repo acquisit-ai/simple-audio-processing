@@ -86,6 +86,7 @@ CLAUDE.md
 # Output directories (generated content)
 1transcript-raw/
 2cleaned-data/
+3clipped/
 3llm/
 4final/
 webp/

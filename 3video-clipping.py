@@ -10,24 +10,30 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 # ==========================================
 # 1. 定义结构化输出数据模型
-#    - ClipBoundary: 只描述大模型需要决定的“句子边界”
+#    - LLMClip: 大模型输出的中间结果，包含 index 和 time，便于自查
 #    - Clip: 在 ClipBoundary 基础上补齐精确时间和缓冲时间
-#    - ClipBoundaryResponse: 约束模型必须返回 {"clips": [...]} 结构
+#    - LLMClipResponse: 约束模型必须返回 {"clips": [...]} 结构
 # ==========================================
-class ClipBoundary(BaseModel):
+class LLMClip(BaseModel):
     clip_id: int = Field(description="切片的唯一序号")
     start_index: int = Field(description="切片起始台词的 index")
     end_index: int = Field(description="切片结束台词的 index")
+    start_time: int = Field(description="切片第一句台词的 start 原始毫秒数，仅供自查")
+    end_time: int = Field(description="切片最后一句台词的 end 原始毫秒数，仅供自查")
     reasoning: str = Field(description="简述边界判定与取舍逻辑")
 
-class Clip(ClipBoundary):
+class Clip(BaseModel):
+    clip_id: int = Field(description="切片的唯一序号")
+    start_index: int = Field(description="切片起始台词的 index")
+    end_index: int = Field(description="切片结束台词的 index")
     start_time: int = Field(description="切片的起始绝对毫秒数")
     end_time: int = Field(description="切片的结束绝对毫秒数")
     buffered_start_time: int = Field(description="带缓冲的切片起始毫秒数，用于实际视频裁切")
     buffered_end_time: int = Field(description="带缓冲的切片结束毫秒数，用于实际视频裁切")
+    reasoning: str = Field(description="简述边界判定与取舍逻辑")
 
-class ClipBoundaryResponse(BaseModel):
-    clips: List[ClipBoundary] = Field(description="切片数组")
+class LLMClipResponse(BaseModel):
+    clips: List[LLMClip] = Field(description="切片数组")
 
 # ==========================================
 # 2. 初始化运行环境与 LLM
@@ -46,11 +52,12 @@ if not OPENAI_API_KEY:
 llm = ChatOpenAI(
     api_key=OPENAI_API_KEY,
     model="gpt-5.4", # 必须使用支持严格结构化输出的模型
-    temperature=0.1 # 极低温度，确保逻辑确定性
+    # gpt-5.* 在 reasoning_effort != "none" 时不支持自定义 temperature
+    reasoning_effort="medium",
 )
 
-# 绑定结构化输出模型，要求 LLM 严格按 ClipBoundaryResponse 返回
-structured_llm = llm.with_structured_output(ClipBoundaryResponse)
+# 绑定结构化输出模型，要求 LLM 严格按 LLMClipResponse 返回
+structured_llm = llm.with_structured_output(LLMClipResponse)
 
 # 以下参数用于“精确时间 -> 带缓冲时间”的后处理
 # 思路是 gap-based + clamp + 左小右大 + 安全边界
@@ -86,11 +93,14 @@ SYSTEM_PROMPT = """
 - 如果两个切法都同样自然，可优先选择更适合跟读、复述、单独学习的方案。
 
 # 输出要求
-只输出句子边界：
+输出切片边界与对应时间，供你自查时长和闭环性：
 - start_index：切片第一句台词的 index
 - end_index：切片最后一句台词的 index
+- start_time：切片第一句台词对应的 start 原始毫秒数
+- end_time：切片最后一句台词对应的 end 原始毫秒数
 - reasoning：简述边界取舍
-- 不要输出 start_time 或 end_time，它们会由程序自动回填
+- 最终写入文件时，程序会根据 start_index / end_index 用原始 transcript 重新回填时间
+- 因此你输出的 start_time / end_time 主要用于你自己检查切片时长是否合理
 """
 
 REFLECTION_PROMPT = """
@@ -227,12 +237,13 @@ def compute_buffered_times(
 
 # ==========================================
 # 7. 根据 transcript 回填时间字段
-#    - LLM 只返回 start_index / end_index
+#    - LLM 会返回 start_index / end_index / start_time / end_time
+#    - 但最终以原始 transcript 为准，完全忽略 LLM 给出的时间值
 #    - 这里根据原始 transcript 回填：
 #      1) 精确 start_time / end_time
 #      2) 带缓冲的 buffered_start_time / buffered_end_time
 # ==========================================
-def add_timestamps_to_clips(clips: List[ClipBoundary], transcript_data: dict) -> List[Clip]:
+def add_timestamps_to_clips(clips: List[LLMClip], transcript_data: dict) -> List[Clip]:
     ordered_sentences = transcript_data.get("sentences", [])
     sentence_map = {
         sentence["index"]: sentence
@@ -283,7 +294,7 @@ def add_timestamps_to_clips(clips: List[ClipBoundary], transcript_data: dict) ->
 #    - 校验切片整体顺序不倒退、区间不重复
 #    - 时长偏离 1~3 分钟时只给 warning，不直接失败
 # ==========================================
-def validate_clip_boundaries(clips: List[ClipBoundary], transcript_data: dict) -> None:
+def validate_clip_boundaries(clips: List[LLMClip], transcript_data: dict) -> None:
     sentences = transcript_data.get("sentences", [])
     if not sentences:
         raise ValueError("transcript_data.sentences 为空，无法进行切片")
@@ -317,6 +328,17 @@ def validate_clip_boundaries(clips: List[ClipBoundary], transcript_data: dict) -
                 f"切片边界非法：start_index({clip.start_index}) > end_index({clip.end_index})"
             )
 
+        expected_start_time = sentence_map[clip.start_index]["start"]
+        expected_end_time = sentence_map[clip.end_index]["end"]
+        if clip.start_time != expected_start_time:
+            print(
+                f"⚠️  切片 {clip.clip_id} 的 start_time={clip.start_time} 与 transcript 回填值 {expected_start_time} 不一致，最终将以 transcript 为准"
+            )
+        if clip.end_time != expected_end_time:
+            print(
+                f"⚠️  切片 {clip.clip_id} 的 end_time={clip.end_time} 与 transcript 回填值 {expected_end_time} 不一致，最终将以 transcript 为准"
+            )
+
         if previous_start_index is not None and clip.start_index < previous_start_index:
             raise ValueError("切片顺序异常：start_index 未按时间顺序递增")
 
@@ -344,9 +366,9 @@ def validate_clip_boundaries(clips: List[ClipBoundary], transcript_data: dict) -
 #    步骤概览：
 #    1) 读取原始 transcript JSON
 #    2) 删除 tokens，只保留句级信息给模型
-#    3) 第一轮生成切片边界
-#    4) 第二轮反思优化边界
-#    5) 校验边界合法性
+#    3) 第一轮生成切片边界与辅助时间
+#    4) 第二轮反思优化边界与辅助时间
+#    5) 校验边界合法性，并检查模型时间与 transcript 是否一致
 #    6) 回填精确时间与缓冲时间
 #    7) 输出到默认 3clipped/ 或用户指定路径
 # ==========================================
@@ -365,14 +387,14 @@ def process_transcript_pipeline(input_filepath: str, output_filepath: str | None
     transcript_text = json.dumps(cleaned_transcript_data, ensure_ascii=False)
     
     # 步骤 3：第一轮切片
-    # 只让模型决定“按哪些句子边界切”，不让它生成时间戳
+    # 让模型同时输出边界与辅助时间，便于其自查时长和闭环性
     print("🚀 [1/3] 执行初次切片生成...")
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=f"请对以下台词进行语义切片：\n{transcript_text}")
     ]
     
-    # structured_llm 会直接返回 ClipBoundaryResponse 对象
+    # structured_llm 会直接返回 LLMClipResponse 对象
     initial_response_obj = structured_llm.invoke(messages)
     
     # 步骤 4：第二轮反思优化
@@ -387,6 +409,7 @@ def process_transcript_pipeline(input_filepath: str, output_filepath: str | None
     final_response_obj = structured_llm.invoke(messages)
 
     # 步骤 5：先校验边界是否合法，再做时间回填
+    # 注意：即便模型给出的 start_time / end_time 有偏差，最终仍以 transcript 为准
     validate_clip_boundaries(final_response_obj.clips, transcript_data)
 
     # 步骤 6：根据原始 transcript 回填精确时间和带缓冲时间
