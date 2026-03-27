@@ -96,7 +96,28 @@ def collect_input_files(input_dir: Path) -> list[Path]:
 
 
 # ==========================================
-# 5. 批量执行主流程
+# 5. 进度输出工具
+#    - 统一格式化批处理进度，便于观察当前完成比例
+#    - 显示成功数、失败数、重试后成功数和剩余数
+# ==========================================
+def format_progress_line(
+    completed_count: int,
+    total_files: int,
+    success_count: int,
+    failed_count: int,
+    retried_success_count: int,
+) -> str:
+    progress_pct = (completed_count / total_files) * 100 if total_files else 0
+    remaining_count = total_files - completed_count
+    return (
+        f"[{completed_count}/{total_files} | {progress_pct:.1f}%] "
+        f"成功 {success_count} | 失败 {failed_count} | "
+        f"重试后成功 {retried_success_count} | 剩余 {remaining_count}"
+    )
+
+
+# ==========================================
+# 6. 批量执行主流程
 #    - 用 ThreadPoolExecutor 启动最多 5 个并发任务
 #    - 每个任务独立调用现有的 3video-clipping.py
 #    - 主线程持续汇总进度、失败原因和最终统计
@@ -118,38 +139,61 @@ def process_all_files(
     print(f"输出目录: {output_dir}")
     print(f"并发线程数: {max_workers}")
     print(f"失败重试次数: {max_retries}")
+    print("已提交全部任务，开始并发处理...\n")
+
+    task_info_map = {
+        input_path: {
+            "task_number": index,
+            "total_files": total_files,
+        }
+        for index, input_path in enumerate(input_files, start=1)
+    }
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(
+        future_map = {}
+        for input_path in input_files:
+            task_info = task_info_map[input_path]
+            print(
+                f"[{task_info['task_number']}/{task_info['total_files']}] "
+                f"开始处理: {input_path.name}"
+            )
+            future = executor.submit(
                 process_one_file_with_retry,
                 input_path,
                 output_dir,
                 max_retries,
-            ): input_path
-            for input_path in input_files
-        }
+            )
+            future_map[future] = input_path
 
         completed_count = 0
+        retried_success_count = 0
         for future in as_completed(future_map):
             completed_count += 1
             result = future.result()
             input_path = result["input_path"]
+            task_info = task_info_map[input_path]
 
             if result["returncode"] == 0:
                 success_results.append(result)
                 if result.get("retried"):
+                    retried_success_count += 1
                     print(
-                        f"[{completed_count}/{total_files}] 重试后成功: {input_path.name} "
-                        f"(第 {result['attempt']} 次)"
+                        f"[{task_info['task_number']}/{task_info['total_files']}] "
+                        f"完成处理: {input_path.name} | 重试后成功 (第 {result['attempt']} 次) | "
+                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}"
                     )
                 else:
-                    print(f"[{completed_count}/{total_files}] 成功: {input_path.name}")
+                    print(
+                        f"[{task_info['task_number']}/{task_info['total_files']}] "
+                        f"完成处理: {input_path.name} | 成功 | "
+                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}"
+                    )
             else:
                 failed_results.append(result)
                 print(
-                    f"[{completed_count}/{total_files}] 失败: {input_path.name} "
-                    f"(已尝试 {result['attempt']}/{result['max_attempts']} 次)"
+                    f"[{task_info['task_number']}/{task_info['total_files']}] "
+                    f"完成处理: {input_path.name} | 失败 (已尝试 {result['attempt']}/{result['max_attempts']} 次) | "
+                    f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}"
                 )
                 if result["stderr"].strip():
                     print(result["stderr"].strip())
@@ -159,7 +203,6 @@ def process_all_files(
     print("\n批处理完成")
     print(f"成功: {len(success_results)}")
     print(f"失败: {len(failed_results)}")
-    retried_success_count = sum(1 for result in success_results if result.get("retried"))
     print(f"重试后成功: {retried_success_count}")
 
     if failed_results:
@@ -172,7 +215,7 @@ def process_all_files(
 
 
 # ==========================================
-# 6. 命令行入口
+# 7. 命令行入口
 #    - 可自定义输入目录、输出目录和线程数
 #    - 默认值即覆盖当前项目的批处理需求
 # ==========================================
@@ -192,7 +235,7 @@ if __name__ == "__main__":
         "--max-workers",
         type=int,
         default=DEFAULT_MAX_WORKERS,
-        help="线程池大小，默认 4",
+        help="线程池大小，默认 5",
     )
     parser.add_argument(
         "--max-retries",
