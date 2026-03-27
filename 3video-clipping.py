@@ -15,25 +15,36 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 #    - LLMClipResponse: 约束模型必须返回 {"clips": [...]} 结构
 # ==========================================
 class LLMClip(BaseModel):
-    clip_id: int = Field(description="切片的唯一序号")
-    start_index: int = Field(description="切片起始台词的 index")
-    end_index: int = Field(description="切片结束台词的 index")
-    start_time: int = Field(description="切片第一句台词的 start 原始毫秒数，仅供自查")
-    end_time: int = Field(description="切片最后一句台词的 end 原始毫秒数，仅供自查")
-    reasoning: str = Field(description="简述边界判定与取舍逻辑")
+    clip_id: int = Field(description="Sequential clip identifier.")
+    start_index: int = Field(description="Index of the first sentence in the clip.")
+    end_index: int = Field(description="Index of the last sentence in the clip.")
+    start_time: int = Field(description="Original start timestamp in milliseconds for the first sentence, used only for self-checking.")
+    end_time: int = Field(description="Original end timestamp in milliseconds for the last sentence, used only for self-checking.")
+    reasoning: str = Field(description="Brief explanation of why these boundaries were chosen.")
 
 class Clip(BaseModel):
-    clip_id: int = Field(description="切片的唯一序号")
-    start_index: int = Field(description="切片起始台词的 index")
-    end_index: int = Field(description="切片结束台词的 index")
-    start_time: int = Field(description="切片的起始绝对毫秒数")
-    end_time: int = Field(description="切片的结束绝对毫秒数")
-    buffered_start_time: int = Field(description="带缓冲的切片起始毫秒数，用于实际视频裁切")
-    buffered_end_time: int = Field(description="带缓冲的切片结束毫秒数，用于实际视频裁切")
-    reasoning: str = Field(description="简述边界判定与取舍逻辑")
+    clip_id: int = Field(description="Sequential clip identifier.")
+    start_index: int = Field(description="Index of the first sentence in the clip.")
+    end_index: int = Field(description="Index of the last sentence in the clip.")
+    start_time: int = Field(description="Exact start timestamp in milliseconds.")
+    end_time: int = Field(description="Exact end timestamp in milliseconds.")
+    buffered_start_time: int = Field(description="Buffered clip start timestamp in milliseconds for actual video cutting.")
+    buffered_end_time: int = Field(description="Buffered clip end timestamp in milliseconds for actual video cutting.")
+    reasoning: str = Field(description="Brief explanation of why these boundaries were chosen.")
 
 class LLMClipResponse(BaseModel):
-    clips: List[LLMClip] = Field(description="切片数组")
+    clips: List[LLMClip] = Field(description="Array of clip objects.")
+
+# LLMClip / Clip / LLMClipResponse 中文对照
+# clip_id：切片的唯一序号
+# start_index：切片起始台词的 index
+# end_index：切片结束台词的 index
+# start_time：切片第一句台词的 start 原始毫秒数，仅供模型自查
+# end_time：切片最后一句台词的 end 原始毫秒数，仅供模型自查
+# buffered_start_time：带缓冲的切片起始毫秒数，用于实际视频裁切
+# buffered_end_time：带缓冲的切片结束毫秒数，用于实际视频裁切
+# reasoning：边界取舍原因阐述
+# clips：切片数组
 
 # ==========================================
 # 2. 初始化运行环境与 LLM
@@ -75,47 +86,93 @@ DEFAULT_EDGE_RIGHT_BUFFER_MS = 1800
 #    - REFLECTION_PROMPT: 负责第二轮复核，尽量修掉明显边界问题
 # ==========================================
 SYSTEM_PROMPT = """
-你是一个负责视频流预处理的“语义切片引擎”。你的唯一任务是读取带有毫秒级时间戳的 JSON 台词文本，将其划分为多个 1 到 3 分钟（约 60,000 - 180,000 毫秒）的粗略区块，专供英语学习使用。
+You are a semantic clipping engine for video preprocessing. Your only task is to read transcript JSON with millisecond timestamps and divide it into rough clips of about 1 to 3 minutes (about 60,000 to 180,000 ms) for English learning.
 
-# 核心目标
-1. 语义闭环优先：每个切片应尽量自洽，单独观看时不明显悬空。
-2. 语言连贯优先：不要在完整句子、紧凑问答或强依赖上下文的表达链条中间切断。
-3. 起点自然：避免让切片以明显承接上文的代词、连词或残句开头。
-4. 时长是次级约束：若无法同时满足时长和语义完整，优先保证语义完整，再尽量靠近 3 分钟。
+# Core goals
+1. Semantic closure first: each clip should feel as self-contained as possible and should not feel obviously context-dependent when watched alone.
+2. Limited overlap is allowed if it helps preserve closure, but avoid excessive repetition between adjacent clips.
+3. Linguistic continuity first: do not cut inside a complete sentence, a tight question-answer exchange, or a strongly connected expression chain.
+4. Natural openings: avoid starting a clip with a pronoun, conjunction, or fragment that clearly depends on previous context.
+5. Duration is a secondary constraint: if duration and semantic integrity conflict, prefer semantic integrity and then stay as close as possible to 3 minutes.
+6. Leave-gap cleanup: you may drop segments with very low English-learning value, such as stretches with no useful expressions, phrases, or collocations. Large timeline gaps are acceptable when justified.
 
-# 切分线索
-- 优先在场景切换、话题切换、较长停顿、问答回合结束、动作/笑点完成后切分。
-- 不要把 setup 和 payoff、提问和回答、建议和回应拆到两个切片里。
-- 默认尽量覆盖大部分有学习价值的对白；只在片段明显低价值、重复寒暄或强依赖前文且难以独立成立时才舍弃。
+# Segmentation cues (soft guidance)
+- Split according to content naturally, keep overall clip count reasonable, and preferably keep the total number of clips within about 12 when possible.
+- Prefer cuts around scene changes, topic changes, longer pauses, the end of a question-answer turn, or after an action/joke payoff is completed.
+- Do not split setup from payoff, question from answer, or suggestion from response across two clips unless necessary.
+- By default, try to cover most dialogue with learning value; only drop segments that are clearly low-value, repetitive small talk, or too context-dependent to stand alone.
 
-# 英语学习导向（软建议）
-- 在不破坏语义闭环的前提下，可优先保留包含高频口语、自然问答、固定搭配、短语动词、习语、情绪表达、职场/日常场景表达的片段。
-- 如果两个切法都同样自然，可优先选择更适合跟读、复述、单独学习的方案。
+# English-learning preference (soft guidance)
+- Without harming semantic closure, prefer segments containing frequent spoken English, natural question-answering, collocations, phrasal verbs, idioms, emotional expressions, and workplace or everyday expressions.
+- If two boundary choices are equally natural, prefer the one that is better for shadowing, retelling, or standalone study.
 
-# 输出要求
-输出切片边界与对应时间，供你自查时长和闭环性：
-- start_index：切片第一句台词的 index
-- end_index：切片最后一句台词的 index
-- start_time：切片第一句台词对应的 start 原始毫秒数
-- end_time：切片最后一句台词对应的 end 原始毫秒数
-- reasoning：简述边界取舍
-- 最终写入文件时，程序会根据 start_index / end_index 用原始 transcript 重新回填时间
-- 因此你输出的 start_time / end_time 主要用于你自己检查切片时长是否合理
+# Output requirements
+Output clip boundaries together with corresponding timestamps:
+- start_index: index of the first sentence in the clip
+- end_index: index of the last sentence in the clip
+- start_time: original start timestamp in milliseconds for the first sentence
+- end_time: original end timestamp in milliseconds for the last sentence
+- reasoning: short explanation of the boundary choice
 """
+
+# SYSTEM_PROMPT 中文对照
+# 你是一个负责视频流预处理的“语义切片引擎”。你的唯一任务是读取带有毫秒级时间戳的 JSON 台词文本，
+# 将其划分为多个 1 到 3 分钟（约 60,000 - 180,000 毫秒）的粗略区块，专供英语学习使用。
+#
+# 核心目标
+# 1. 语义闭环优先：每个切片应尽量自洽，单独观看时不明显悬空。
+# 2. 适度重叠以保闭环：相邻切片之间允许有部分时间段重叠，但严禁重叠过多导致学习重复。
+# 3. 语言连贯优先：不要在完整句子、紧凑问答或强依赖上下文的表达链条中间切断。
+# 4. 起点自然：避免让切片以明显承接上文的代词、连词或残句开头。
+# 5. 时长是次级约束：若无法同时满足时长和语义完整，优先保证语义完整，再尽量靠近 3 分钟。
+# 6. 留白清洗：丢弃语言学习价值极低的片段，例如没有有价值的词组搭配、短语或表达。允许大段时间轴留白。
+#
+# 切分线索（软建议）
+# - 根据内容合理切分，控制长短，总数量最好控制在 12 个及以内。
+# - 优先在场景切换、话题切换、较长停顿、问答回合结束、动作/笑点完成后切分。
+# - 不要把 setup 和 payoff、提问和回答、建议和回应拆到两个切片里。
+# - 默认尽量覆盖大部分有学习价值的对白；在片段明显低价值、重复寒暄或强依赖前文且难以独立成立时舍弃。
+#
+# 英语学习导向（软建议）
+# - 在不破坏语义闭环的前提下，可优先保留包含高频口语、自然问答、固定搭配、短语动词、习语、情绪表达、职场/日常场景表达的片段。
+# - 如果两个切法都同样自然，可优先选择更适合跟读、复述、单独学习的方案。
+#
+# 输出要求
+# 输出切片边界与对应时间：
+# - start_index：切片第一句台词的 index
+# - end_index：切片最后一句台词的 index
+# - start_time：切片第一句台词对应的 start 原始毫秒数
+# - end_time：切片最后一句台词对应的 end 原始毫秒数
+# - reasoning：边界取舍原因阐述
 
 REFLECTION_PROMPT = """
-请作为严格的质检员，重新审视你刚才输出的切片方案。
-审查重点：
-1. 是否有明显的“首句代词悬空”导致语境断裂？
-2. 是否有切片的时间跨度严重偏离 60,000 - 180,000 毫秒的硬性约束？
-3. 是否错误切断了紧凑的问答回合？
-4. 是否因为过度保守而遗漏了大量本可学习的对白？
-5. 是否有不必要的大量重叠？
-6. 是否有更适合学习的边界选择，可以保留更完整的常用表达、问答链条或固定搭配？
+Act as a strict quality reviewer and re-check your previous clipping plan.
 
-如果发现缺陷，请修正并输出优化后的完整结果对象，格式必须仍然是 {"clips": [...]}。
-如果逻辑已经闭环，无需优化，请直接原样输出之前的完整结果对象，格式必须仍然是 {"clips": [...]}。
+Review checklist:
+1. Does any clip start with an obviously dangling pronoun or context-dependent opening?
+2. Does any clip duration clearly deviate too far from the 60,000-180,000 ms target range?
+3. Did you incorrectly cut inside a tight question-answer exchange or another strongly linked dialogue unit?
+4. Were you overly conservative and therefore skipped too much dialogue that still has learning value?
+5. Is there unnecessary heavy overlap between adjacent clips?
+6. Is there a better boundary choice that would preserve more complete everyday expressions, question-answer chains, or collocations for learning?
+
+If you find issues, fix them and output the full corrected result object in the same format: {"clips": [...]}.
+If the plan is already solid, output the previous full result object unchanged, still in the format: {"clips": [...]}.
 """
+
+# REFLECTION_PROMPT 中文对照
+# 请作为严格的质检员，重新审视你刚才输出的切片方案。
+#
+# 审查重点：
+# 1. 是否有明显的“首句代词悬空”导致语境断裂？
+# 2. 是否有切片的时间跨度严重偏离 60,000 - 180,000 毫秒的约束？
+# 3. 是否错误切断了紧凑的问答回合？
+# 4. 是否因为过度保守而遗漏了大量本可学习的对白？
+# 5. 是否有不必要的大量重叠？
+# 6. 是否有更适合学习的边界选择，可以保留更完整的常用表达、问答链条或固定搭配？
+#
+# 如果发现缺陷，请修正并输出优化后的完整结果对象，格式必须仍然是 {"clips": [...]}。
+# 如果逻辑已经闭环，无需优化，请直接原样输出之前的完整结果对象，格式必须仍然是 {"clips": [...]}。
 
 
 # ==========================================
@@ -389,9 +446,10 @@ def process_transcript_pipeline(input_filepath: str, output_filepath: str | None
     # 步骤 3：第一轮切片
     # 让模型同时输出边界与辅助时间，便于其自查时长和闭环性
     print("🚀 [1/3] 执行初次切片生成...")
+    # HumanMessage 中文对照：请对以下台词进行语义切片：
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=f"请对以下台词进行语义切片：\n{transcript_text}")
+        HumanMessage(content=f"Please perform semantic clipping on the following transcript:\n{transcript_text}")
     ]
     
     # structured_llm 会直接返回 LLMClipResponse 对象
