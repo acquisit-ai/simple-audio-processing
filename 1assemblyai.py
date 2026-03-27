@@ -10,13 +10,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def build_assemblyai_config():
+DEFAULT_SHOW_NAME = "an American TV show"
+
+
+def _build_prompt_show_name(show_name=None):
+    """返回用于 prompt 的剧名描述；未提供时回退到默认英文描述。"""
+    normalized_show_name = (show_name or "").strip()
+    return normalized_show_name or DEFAULT_SHOW_NAME
+
+
+def build_assemblyai_config(show_name=None):
     """
     构建 AssemblyAI 转写配置。
+
+    Args:
+        show_name: 可选的剧名，用于增强 prompt 中的上下文；未提供时默认使用英文“美剧”描述
 
     返回:
         tuple[aai.TranscriptionConfig, dict]: SDK 配置对象和可打印的参数字典
     """
+    prompt_show_name = _build_prompt_show_name(show_name)
 
     config = aai.TranscriptionConfig(
         # --- 核心模型与语言 ---
@@ -31,7 +44,7 @@ def build_assemblyai_config():
         # speech_threshold=None,  # 音频最低语音占比阈值；过低时可拒绝低语音密度音频。
 
         # --- U3 Pro 提示增强 ---
-        prompt="Transcribe this American TV episode accurately, preserve dialogue and slang, and keep punctuation natural.",  # 自然语言提示词；用于约束转写风格和术语理解。
+        prompt=f"Transcribe this episode of {prompt_show_name} accurately, preserve dialogue and slang, and keep punctuation natural.",  # 自然语言提示词；用于约束转写风格和术语理解。
         # keyterms_prompt=None,  # 关键词增强列表；用于提升特定词汇识别。注意它不能和 prompt 同时使用。
         # keyterms_prompt_options=None,  # 关键词增强高级选项；仅在启用 keyterms_prompt 时使用。
         temperature=0.1,  # 输出随机性；0 最稳定，数值越高生成越发散。
@@ -88,13 +101,14 @@ def build_assemblyai_config():
     return config, config_dict
 
 
-def run_assemblyai_with_local_file(local_audio_path, output_path=None):
+def run_assemblyai_with_local_file(local_audio_path, output_path=None, show_name=None):
     """
     使用本地音频文件调用 AssemblyAI 转写 API。
 
     Args:
         local_audio_path: 音频文件路径
         output_path: 输出文件路径，默认为当前目录下的 1transcript-raw/AssemblyAI Universal-3-Pro 文件夹
+        show_name: 可选的剧名，用于替换 prompt 中默认的美剧描述
     """
 
     print("=" * 60)
@@ -109,7 +123,7 @@ def run_assemblyai_with_local_file(local_audio_path, output_path=None):
     aai.settings.api_key = api_key
     print("✓ AssemblyAI SDK 已初始化")
 
-    config, config_dict = build_assemblyai_config()
+    config, config_dict = build_assemblyai_config(show_name=show_name)
     output_folder = "AssemblyAI Universal-3-Pro"
 
     print(f"\n音频文件信息:")
