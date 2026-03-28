@@ -16,7 +16,7 @@ DEFAULT_INPUT_DIR = Path("2cleaned-data")
 DEFAULT_OUTPUT_DIR = Path("3clipped")
 DEFAULT_MAX_WORKERS = 5
 DEFAULT_MAX_RETRIES = 1
-CLIPPING_SCRIPT = Path("3video-clipping.py")
+CLIPPING_SCRIPT = Path("3llm-clipping.py")
 
 
 # ==========================================
@@ -35,20 +35,29 @@ def process_one_file(input_path: Path, output_dir: Path) -> dict:
         str(output_path),
     ]
 
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).parent,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent,
+        )
 
-    return {
-        "input_path": input_path,
-        "output_path": output_path,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-    }
+        return {
+            "input_path": input_path,
+            "output_path": output_path,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+    except Exception as exc:
+        return {
+            "input_path": input_path,
+            "output_path": output_path,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": f"{type(exc).__name__}: {exc}",
+        }
 
 
 # ==========================================
@@ -60,14 +69,20 @@ def process_one_file(input_path: Path, output_dir: Path) -> dict:
 def process_one_file_with_retry(
     input_path: Path,
     output_dir: Path,
+    task_number: int,
+    total_files: int,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:
+    print(f"[{task_number}/{total_files}] 开始处理: {input_path.name}", flush=True)
+
     last_result = None
 
     for attempt in range(max_retries + 1):
         result = process_one_file(input_path, output_dir)
         result["attempt"] = attempt + 1
         result["max_attempts"] = max_retries + 1
+        result["task_number"] = task_number
+        result["total_files"] = total_files
 
         if result["returncode"] == 0:
             result["retried"] = attempt > 0
@@ -119,7 +134,7 @@ def format_progress_line(
 # ==========================================
 # 6. 批量执行主流程
 #    - 用 ThreadPoolExecutor 启动最多 5 个并发任务
-#    - 每个任务独立调用现有的 3video-clipping.py
+#    - 每个任务独立调用现有的 3llm-clipping.py
 #    - 主线程持续汇总进度、失败原因和最终统计
 # ==========================================
 def process_all_files(
@@ -135,11 +150,11 @@ def process_all_files(
     success_results = []
     failed_results = []
 
-    print(f"待处理文件数: {total_files}")
-    print(f"输出目录: {output_dir}")
-    print(f"并发线程数: {max_workers}")
-    print(f"失败重试次数: {max_retries}")
-    print("已提交全部任务，开始并发处理...\n")
+    print(f"待处理文件数: {total_files}", flush=True)
+    print(f"输出目录: {output_dir}", flush=True)
+    print(f"并发线程数: {max_workers}", flush=True)
+    print(f"失败重试次数: {max_retries}", flush=True)
+    print("已提交全部任务，开始并发处理...\n", flush=True)
 
     task_info_map = {
         input_path: {
@@ -153,14 +168,12 @@ def process_all_files(
         future_map = {}
         for input_path in input_files:
             task_info = task_info_map[input_path]
-            print(
-                f"[{task_info['task_number']}/{task_info['total_files']}] "
-                f"开始处理: {input_path.name}"
-            )
             future = executor.submit(
                 process_one_file_with_retry,
                 input_path,
                 output_dir,
+                task_info["task_number"],
+                task_info["total_files"],
                 max_retries,
             )
             future_map[future] = input_path
@@ -180,35 +193,38 @@ def process_all_files(
                     print(
                         f"[{task_info['task_number']}/{task_info['total_files']}] "
                         f"完成处理: {input_path.name} | 重试后成功 (第 {result['attempt']} 次) | "
-                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}"
+                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}",
+                        flush=True,
                     )
                 else:
                     print(
                         f"[{task_info['task_number']}/{task_info['total_files']}] "
                         f"完成处理: {input_path.name} | 成功 | "
-                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}"
+                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}",
+                        flush=True,
                     )
             else:
                 failed_results.append(result)
                 print(
                     f"[{task_info['task_number']}/{task_info['total_files']}] "
                     f"完成处理: {input_path.name} | 失败 (已尝试 {result['attempt']}/{result['max_attempts']} 次) | "
-                    f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}"
+                    f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}",
+                    flush=True,
                 )
                 if result["stderr"].strip():
-                    print(result["stderr"].strip())
+                    print(result["stderr"].strip(), flush=True)
                 elif result["stdout"].strip():
-                    print(result["stdout"].strip())
+                    print(result["stdout"].strip(), flush=True)
 
-    print("\n批处理完成")
-    print(f"成功: {len(success_results)}")
-    print(f"失败: {len(failed_results)}")
-    print(f"重试后成功: {retried_success_count}")
+    print("\n批处理完成", flush=True)
+    print(f"成功: {len(success_results)}", flush=True)
+    print(f"失败: {len(failed_results)}", flush=True)
+    print(f"重试后成功: {retried_success_count}", flush=True)
 
     if failed_results:
-        print("\n失败文件列表:")
+        print("\n失败文件列表:", flush=True)
         for result in failed_results:
-            print(f"- {result['input_path'].name}")
+            print(f"- {result['input_path'].name}", flush=True)
         return 1
 
     return 0
