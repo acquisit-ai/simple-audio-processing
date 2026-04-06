@@ -40,7 +40,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 DEFAULT_BATCH_SIZE = 3
 DEFAULT_STAGE_ONE_MODEL = "gpt-5.4-mini"
-DEFAULT_STAGE_THREE_MODEL = "gpt-5.4-mini"
+DEFAULT_STAGE_ONE_REASONING_EFFORT = "high"
+DEFAULT_STAGE_THREE_MODEL = "gpt-5.4-nano"
+DEFAULT_STAGE_THREE_REASONING_EFFORT = "high"
 ROOT_DIR = Path(__file__).resolve().parent
 QUERY_SCRIPT_PATH = ROOT_DIR / "supabase" / "query_coarse_units.py"
 DIRECT_NO_MATCH_BASEFORMS = {
@@ -106,12 +108,12 @@ STAGE_ONE_PROMPT = """
 2. 以输入 tokens 为唯一基础单位合并为有意义的语言元素分片; 只能将相邻 tokens 合并，不能改写文本。
 3. 输出必须完整覆盖所有输入 tokens, 输出 token 之间不得重叠、不得跳词、不得打乱顺序。
 4. 合并目标以英语学习为导向：
-   - 固定短语、常见搭配、需要整体理解的结构优先合并
-   - 普通自由组合, 或者单个值得学习的单词不要强行合并
-   - 对于难度稍高的词组（如"be addicted to"），应该合并为一个token，在explanation中同时解释短语含义和核心单词，semanticElement.baseForm应为核心词的原形（如"addicted"）。
+   - 固定短语、常见搭配的结构优先合并
+   - 普通自由组合而非常见短语, 不要合并, 保持单个单词独立性
+   - 以一个核心单词为主体的词语用法或者语法搭配（如"be addicted to"），应该合并为一个token，在explanation中同时解释短语含义和核心单词，semanticElement.baseForm应为核心词的原形（如"addicted"）。
 6. 对每个输出 token：
-   - 提供符合上下文语境的中文翻译/解释 explanation
-   - 生成 semanticElement.baseForm 单词的原形（running -> run，studies -> study)
+   - 提供符合上下文语境的中文翻译和相关解释 explanation
+   - 生成 semanticElement.baseForm 单词的原形（running -> run，studies -> study), 或者短语无时态形式(looking forward to -> look forward to)
    - 生成 semanticElement.dictionary 上下文无关词典释义
 7. 你必须保持输出句子和 tokens 顺序与输入完全一致。
 
@@ -119,13 +121,15 @@ STAGE_ONE_PROMPT = """
 - "by the way" -> 固定短语
 - "deal with" -> 固定搭配
 - "at the same time" -> 固定短语
-- "looking forward to" -> 固定搭配
+- "look forward to" -> 固定搭配
+- "break down" -> 固定搭配
 - "be addicted to" -> explanation: "对...上瘾；addicted表示沉迷的、上瘾的"，baseForm: "addicted"
 
 反面例子(不要合并)：
-- I am happy
-- the book
-- very good
+- girl group
+- math class
+- in the office
+- software development
 """
 
 STAGE_THREE_SYSTEM_PROMPT = """
@@ -197,7 +201,8 @@ STAGE_THREE_RULES_PROMPT = """
 - 对大部分单词，第一次精确搜索就已经足够；可以直接 match/no_match，通常不应再返回 `search`
 - 词组或变形表达，才适合继续搜索更短、更核心或更标准的精确查询词
 - 新查询词应尽量朝“核心词 / 更标准写法 / 去掉不必要修饰”收缩，而不是保留整段原短语继续绕圈搜索
-- 不要把整句里的额外修饰词一起带入搜索
+- 不要把整句里的额外修饰词一起带入搜索, 也不允许搜索近义词, 类似意思的短语
+
 - 合理例子：
   - `be addicted to` -> 可以继续查 `addicted to`、`addicted`、`addict`
   - `setting up` -> 可以继续查 `set up`、`set`
@@ -369,9 +374,19 @@ def parse_args() -> argparse.Namespace:
         help="OpenAI model for stage one.",
     )
     parser.add_argument(
+        "--stage-one-reasoning-effort",
+        default=DEFAULT_STAGE_ONE_REASONING_EFFORT,
+        help="Reasoning effort for stage one.",
+    )
+    parser.add_argument(
         "--stage-three-model",
         default=DEFAULT_STAGE_THREE_MODEL,
         help="OpenAI model for stage three.",
+    )
+    parser.add_argument(
+        "--stage-three-reasoning-effort",
+        default=DEFAULT_STAGE_THREE_REASONING_EFFORT,
+        help="Reasoning effort for stage three.",
     )
     return parser.parse_args()
 
@@ -386,13 +401,18 @@ def load_openai_api_key(env_path: Path) -> str:
     return api_key
 
 
-def create_structured_llm(api_key: str, model_name: str, schema: type[BaseModel]) -> Any:
+def create_structured_llm(
+    api_key: str,
+    model_name: str,
+    reasoning_effort: str,
+    schema: type[BaseModel],
+) -> Any:
     """创建一个绑定结构化输出 schema 的 OpenAI 聊天模型。"""
 
     llm = ChatOpenAI(
         api_key=api_key,
         model=model_name,
-        reasoning_effort="low",
+        reasoning_effort=reasoning_effort,
     )
     return llm.with_structured_output(schema)
 
@@ -1225,8 +1245,18 @@ def main() -> None:
         raise SystemExit("--batch-size must be at least 1")
 
     api_key = load_openai_api_key(args.env_path)
-    stage_one_llm = create_structured_llm(api_key, args.stage_one_model, StageOneOutput)
-    stage_three_llm = create_structured_llm(api_key, args.stage_three_model, StageThreeDecision)
+    stage_one_llm = create_structured_llm(
+        api_key=api_key,
+        model_name=args.stage_one_model,
+        reasoning_effort=args.stage_one_reasoning_effort,
+        schema=StageOneOutput,
+    )
+    stage_three_llm = create_structured_llm(
+        api_key=api_key,
+        model_name=args.stage_three_model,
+        reasoning_effort=args.stage_three_reasoning_effort,
+        schema=StageThreeDecision,
+    )
     query_runner = CoarseQueryRunner(ROOT_DIR, QUERY_SCRIPT_PATH)
 
     input_payload = load_json(args.input_json)
@@ -1252,6 +1282,10 @@ def main() -> None:
     log_step(f"输入文件：{args.input_json}")
     log_step(f"输出文件：{args.output_json}")
     log_step(f"审计文件：{audit_path}")
+    log_step(f"阶段 1 模型：{args.stage_one_model}")
+    log_step(f"阶段 1 reasoning_effort：{args.stage_one_reasoning_effort}")
+    log_step(f"阶段 3 模型：{args.stage_three_model}")
+    log_step(f"阶段 3 reasoning_effort：{args.stage_three_reasoning_effort}")
     log_step(f"总句子数：{len(input_sentences)}")
     log_step(f"已完成到 sentence.index：{last_completed_index}")
     log_step(f"剩余句子数：{len(remaining_sentences)}")
