@@ -4,7 +4,7 @@ Query coarse-unit label RPC functions via DATABASE_URL in the repo .env file.
 
 Examples:
   python supabase/query_coarse_units.py exact apple
-  python supabase/query_coarse_units.py contain apple "be addicted to" "want to"
+  python supabase/query_coarse_units.py contain apple pear "be addicted to" "want to"
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "queries",
         nargs="+",
-        help="One or more query strings. Each is executed independently.",
+        help="1 to 4 query strings. Each is executed independently.",
     )
     parser.add_argument(
         "--env-path",
@@ -109,14 +109,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def dedupe_queries(queries: list[str]) -> list[str]:
+    """Deduplicate queries while preserving first-seen order."""
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        if query in seen:
+            continue
+        seen.add(query)
+        deduped.append(query)
+    return deduped
+
+
 def main() -> None:
     args = parse_args()
     mode, function_name = normalize_mode(args.mode)
     database_url = load_database_url(args.env_path)
     limit_n = max(1, args.limit)
+    queries = dedupe_queries(args.queries)
+
+    if len(queries) > 4:
+        raise SystemExit("At most 4 query strings are allowed per run.")
 
     results = []
-    for raw_query in args.queries:
+    for raw_query in queries:
         rows = run_query(database_url, function_name, raw_query, limit_n)
         rows = [row for row in rows if row.get("status") == "active"]
         rows = [{key: value for key, value in row.items() if key != "status"} for row in rows]
