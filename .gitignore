@@ -90,6 +90,7 @@ CLAUDE.md
 3llm/
 4final/
 webp/
+resource/
 
 # Jupyter Notebook
 .ipynb_checkpoints
