@@ -41,8 +41,9 @@ from pydantic import BaseModel, Field, ValidationError
 DEFAULT_BATCH_SIZE = 3
 DEFAULT_STAGE_ONE_MODEL = "gpt-5.4-mini"
 DEFAULT_STAGE_ONE_REASONING_EFFORT = "high"
-DEFAULT_STAGE_THREE_MODEL = "gpt-5.4-nano"
+DEFAULT_STAGE_THREE_MODEL = "mimo-v2-pro"
 DEFAULT_STAGE_THREE_REASONING_EFFORT = "high"
+DEFAULT_MIMO_API_BASE = "https://api.xiaomimimo.com/v1/"
 ROOT_DIR = Path(__file__).resolve().parent
 QUERY_SCRIPT_PATH = ROOT_DIR / "supabase" / "query_coarse_units.py"
 DIRECT_NO_MATCH_BASEFORMS = {
@@ -191,10 +192,14 @@ STAGE_THREE_RULES_PROMPT = """
 - 你可以明确判断“这个词或短语在这里就是这个意思”
 - 返回 `match` 时，只返回 coarse_id 和 reason
 - 如果你认为有必要优化 token 的 explanation，也可以同时返回完整优化后的 explanation
+- `match` 的输出结构必须是：
+  {"action":"match","coarse_id":123,"reason":"非空原因","explanation":"可选的完整 explanation"}
 
 什么情形下返回 `search`：
 - 当前候选还不足以确认匹配
 - 但你认为继续搜索仍然有意义，且当前 token 更像是一个需要拆开的词组或屈折形式，而不是一个已经很明确的单词
+- `search` 的输出结构必须是：
+  {"action":"search","queries":["query1","query2"],"reason":"非空原因"}
 
 `search` 的用法：
 - `search` 的作用是告诉系统：下一回应该继续精确查询哪些词
@@ -218,6 +223,14 @@ STAGE_THREE_RULES_PROMPT = """
 - 当前候选虽然表面相似，但你无法确认意思一致
 - 继续搜索也不太可能得到更可靠结果
 - 返回 `no_match` 的意思是：当前 token 不应该绑定到任何 coarse_unit
+- `no_match` 的输出结构必须是：
+  {"action":"no_match","reason":"非空原因"}
+
+统一输出要求：
+- 只输出一个 JSON 对象
+- 不要输出 Markdown
+- 不要输出额外解释
+- 不要使用未要求字段
 """
 
 
@@ -340,7 +353,7 @@ class AuditLogger:
     """
     追加写入 token 级别的搜索审计记录。
 
-    文档要求搜索审计日志保存在输出目录下的 `temp/` 中，并在流程结束后保留。
+    搜索审计日志保存在输出目录下的 `log/` 中，并在流程结束后保留。
     """
 
     def __init__(self, path: Path) -> None:
@@ -391,23 +404,64 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_openai_api_key(env_path: Path) -> str:
-    """按文档要求，从项目根目录 `.env` 读取 OPENAI_API_KEY。"""
+def is_mimo_model(model_name: str) -> bool:
+    """判断当前模型是否走 MiMo 的 OpenAI 兼容接口。"""
+
+    return model_name.strip().lower().startswith("mimo-v2-")
+
+
+def load_model_provider_config(env_path: Path, model_name: str) -> tuple[str, str | None]:
+    """
+    按模型名加载对应供应商的鉴权配置。
+
+    - OpenAI：读取 OPENAI_API_KEY
+    - MiMo：读取 MIMO_API_KEY，并使用兼容的 base_url
+    """
 
     load_dotenv(env_path)
+
+    if is_mimo_model(model_name):
+        api_key = os.getenv("MIMO_API_KEY")
+        if not api_key:
+            raise ValueError(f"MIMO_API_KEY not found in {env_path}")
+        return api_key, os.getenv("MIMO_API_BASE", DEFAULT_MIMO_API_BASE)
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError(f"OPENAI_API_KEY not found in {env_path}")
-    return api_key
+    return api_key, None
 
 
 def create_structured_llm(
-    api_key: str,
+    env_path: Path,
     model_name: str,
     reasoning_effort: str,
     schema: type[BaseModel],
 ) -> Any:
-    """创建一个绑定结构化输出 schema 的 OpenAI 聊天模型。"""
+    """
+    创建一个绑定结构化输出 schema 的聊天模型。
+
+    逻辑保持不变，只在底层按模型名切换供应商：
+    - OpenAI：沿用 `reasoning_effort` + `json_schema`
+    - MiMo：使用 OpenAI 兼容 base_url，reasoning 用布尔开关，结构化输出走 `json_mode`
+    """
+
+    api_key, base_url = load_model_provider_config(env_path, model_name)
+
+    if is_mimo_model(model_name):
+        llm = ChatOpenAI(
+            api_key=api_key,
+            model=model_name,
+            openai_api_base=base_url,
+            use_responses_api=False,
+            extra_body={
+                "reasoning": {
+                    "enabled": reasoning_effort.strip().lower()
+                    not in {"none", "off", "disabled", "false", "0"}
+                }
+            },
+        )
+        return llm.with_structured_output(schema, method="json_mode")
 
     llm = ChatOpenAI(
         api_key=api_key,
@@ -614,10 +668,10 @@ def run_stage_one_with_retry(
     original_batch: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    对一个批次执行阶段 0 + 1 + 2，并在失败时重试一次。
+    对一个批次执行阶段 0 + 1 + 2，并在失败时重试两次。
 
     文档要求：
-    - 如果校验失败，第一阶段重试一次
+    - 如果校验失败，第一阶段重试两次
     - 如果第一阶段 LLM 请求失败，也算一次失败
     - 如果仍失败，则整个流程终止
     - 失败批次不允许进入阶段 3
@@ -626,14 +680,15 @@ def run_stage_one_with_retry(
     cleaned_batch = build_stage_zero_batch(original_batch)
     last_error: Exception | None = None
 
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             stage_one_output = invoke_stage_one(stage_one_llm, cleaned_batch)
             return validate_and_index_batch(original_batch, stage_one_output)
         except Exception as exc:
             last_error = exc
-            if attempt == 0:
-                log_step(f"[阶段 1/2] 首次执行失败，准备重试一次：{exc}", indent=1)
+            if attempt < 2:
+                retry_index = attempt + 1
+                log_step(f"[阶段 1/2] 第 {retry_index} 次执行失败，准备重试：{exc}", indent=1)
                 continue
             raise
 
@@ -1154,53 +1209,73 @@ def process_stage_three_batch(
     return batch_output
 
 
-def ensure_output_parent(output_path: Path) -> None:
-    """准备输出目录以及文档要求的 `temp/` 子目录。"""
+def ensure_output_dirs(output_path: Path) -> tuple[Path, Path]:
+    """准备输出目录及其 `temp/`、`log/` 子目录。"""
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    (output_path.parent / "temp").mkdir(parents=True, exist_ok=True)
+    temp_dir = output_path.parent / "temp"
+    log_dir = output_path.parent / "log"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return temp_dir, log_dir
 
 
-def atomic_write_output(output_path: Path, input_path: Path, payload: dict[str, Any]) -> None:
+def get_intermediate_output_path(output_path: Path) -> Path:
+    """返回批次级中间文件的固定保存路径。"""
+
+    return output_path.parent / "temp" / output_path.name
+
+
+def atomic_write_json(target_path: Path, temp_dir: Path, input_path: Path, payload: dict[str, Any]) -> None:
     """
-    用原子替换的方式保存累计结果。
+    用原子替换方式写入任意 JSON 文件。
 
-    这对应文档中的要求：
-    - 临时文件必须位于 output_dir/temp/
-    - 临时文件名使用输入 JSON 文件名 + 随机后缀
-    - 先写临时文件，再替换目标文件
-    - 只清理临时文件，不清理 temp 目录
+    - 中间文件：target_path 位于 temp/
+    - 最终文件：target_path 位于目标目录
+    - 原子写入时使用随机后缀临时文件，写完后再 replace
     """
 
-    ensure_output_parent(output_path)
-    temp_path = output_path.parent / "temp" / f"{input_path.name}.{secrets.token_hex(8)}.tmp"
+    temp_path = temp_dir / f"{input_path.name}.{secrets.token_hex(8)}.tmp"
     try:
         with temp_path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
-        os.replace(temp_path, output_path)
+        os.replace(temp_path, target_path)
     finally:
         if temp_path.exists():
             temp_path.unlink()
 
 
-def load_existing_output(output_path: Path) -> tuple[list[dict[str, Any]], int]:
+def load_existing_output(output_path: Path) -> tuple[list[dict[str, Any]], int, str]:
     """
-    读取已有输出文件，用于续跑。
+    读取已有输出，用于续跑。
 
-    续跑依据就是文档中定义的最后一个已保存 `sentence.index`。
+    优先级：
+    1. 正式输出文件
+    2. temp/ 中的中间文件
     """
 
-    if not output_path.exists():
-        return [], -1
+    intermediate_path = get_intermediate_output_path(output_path)
 
-    payload = load_json(output_path)
+    source_path: Path | None = None
+    source_label = "none"
+    if output_path.exists():
+        source_path = output_path
+        source_label = "final"
+    elif intermediate_path.exists():
+        source_path = intermediate_path
+        source_label = "intermediate"
+
+    if source_path is None:
+        return [], -1, source_label
+
+    payload = load_json(source_path)
     sentences = payload.get("sentences", [])
     if not isinstance(sentences, list):
         raise ValueError("Existing output JSON does not contain a valid sentences array")
     if not sentences:
-        return [], -1
+        return [], -1, source_label
     last_index = sentences[-1]["index"]
-    return sentences, last_index
+    return sentences, last_index, source_label
 
 
 def validate_input_payload(input_payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1244,15 +1319,14 @@ def main() -> None:
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be at least 1")
 
-    api_key = load_openai_api_key(args.env_path)
     stage_one_llm = create_structured_llm(
-        api_key=api_key,
+        env_path=args.env_path,
         model_name=args.stage_one_model,
         reasoning_effort=args.stage_one_reasoning_effort,
         schema=StageOneOutput,
     )
     stage_three_llm = create_structured_llm(
-        api_key=api_key,
+        env_path=args.env_path,
         model_name=args.stage_three_model,
         reasoning_effort=args.stage_three_reasoning_effort,
         schema=StageThreeDecision,
@@ -1262,8 +1336,13 @@ def main() -> None:
     input_payload = load_json(args.input_json)
     input_sentences = validate_input_payload(input_payload)
 
-    # 续跑逻辑：保留之前已成功保存的批次，并从最后一个已保存 index 的下一句继续。
-    accumulated_sentences, last_completed_index = load_existing_output(args.output_json)
+    temp_dir, log_dir = ensure_output_dirs(args.output_json)
+    intermediate_output_path = get_intermediate_output_path(args.output_json)
+
+    # 续跑逻辑：
+    # - 优先使用正式输出
+    # - 若正式输出不存在，则使用 temp/ 下的中间文件
+    accumulated_sentences, last_completed_index, existing_output_source = load_existing_output(args.output_json)
     remaining_sentences = [sentence for sentence in input_sentences if sentence["index"] > last_completed_index]
 
     if not remaining_sentences:
@@ -1272,7 +1351,7 @@ def main() -> None:
         return
 
     # 审计文件名由文档固定，并且流程结束后不清理。
-    audit_path = args.output_json.parent / "temp" / f"{args.input_json.name}.search_audit.jsonl"
+    audit_path = log_dir / f"{args.input_json.name}.search_audit.jsonl"
     audit_logger = AuditLogger(audit_path)
 
     batches = chunk_sentences(remaining_sentences, args.batch_size)
@@ -1281,11 +1360,17 @@ def main() -> None:
     log_header("启动信息")
     log_step(f"输入文件：{args.input_json}")
     log_step(f"输出文件：{args.output_json}")
+    log_step(f"中间文件：{intermediate_output_path}")
     log_step(f"审计文件：{audit_path}")
+    log_step(f"续跑来源：{existing_output_source}")
     log_step(f"阶段 1 模型：{args.stage_one_model}")
     log_step(f"阶段 1 reasoning_effort：{args.stage_one_reasoning_effort}")
+    if is_mimo_model(args.stage_one_model):
+        log_step(f"阶段 1 MiMo base_url：{os.getenv('MIMO_API_BASE', DEFAULT_MIMO_API_BASE)}")
     log_step(f"阶段 3 模型：{args.stage_three_model}")
     log_step(f"阶段 3 reasoning_effort：{args.stage_three_reasoning_effort}")
+    if is_mimo_model(args.stage_three_model):
+        log_step(f"阶段 3 MiMo base_url：{os.getenv('MIMO_API_BASE', DEFAULT_MIMO_API_BASE)}")
     log_step(f"总句子数：{len(input_sentences)}")
     log_step(f"已完成到 sentence.index：{last_completed_index}")
     log_step(f"剩余句子数：{len(remaining_sentences)}")
@@ -1316,10 +1401,11 @@ def main() -> None:
         )
 
         # 只有整个批次都成功后，才会把结果合并进累计输出，
-        # 并保存最新的可续跑快照。
+        # 并把最新快照写到 temp/ 下，作为可续跑的中间文件。
         accumulated_sentences.extend(batch_final_output["sentences"])
-        atomic_write_output(
-            output_path=args.output_json,
+        atomic_write_json(
+            target_path=intermediate_output_path,
+            temp_dir=temp_dir,
             input_path=args.input_json,
             payload=create_final_payload(accumulated_sentences),
         )
@@ -1328,7 +1414,24 @@ def main() -> None:
             f"[保存] 已写入批次 {batch_idx}/{total_batches}，累计句子数：{len(accumulated_sentences)}",
             indent=1,
         )
-        log_step(f"[保存] 输出文件：{args.output_json}", indent=1)
+        log_step(f"[保存] 中间文件：{intermediate_output_path}", indent=1)
+
+    if len(accumulated_sentences) != len(input_sentences):
+        raise ValueError(
+            "All batches completed but final sentence count does not match input; "
+            "treating run as failed and not saving final output"
+        )
+
+    final_payload = create_final_payload(accumulated_sentences)
+    atomic_write_json(
+        target_path=args.output_json,
+        temp_dir=args.output_json.parent,
+        input_path=args.input_json,
+        payload=final_payload,
+    )
+
+    if intermediate_output_path.exists():
+        intermediate_output_path.unlink()
 
     log_header("执行完成")
     log_step(f"累计输出句子数：{len(accumulated_sentences)}")
