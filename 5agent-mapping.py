@@ -40,10 +40,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 DEFAULT_BATCH_SIZE = 3
 DEFAULT_STAGE_ONE_MODEL = "gpt-5.4-mini"
-DEFAULT_STAGE_ONE_REASONING_EFFORT = "high"
-DEFAULT_STAGE_THREE_MODEL = "mimo-v2-pro"
+DEFAULT_STAGE_ONE_REASONING_EFFORT = "medium"
+DEFAULT_STAGE_THREE_MODEL = "gpt-5.4-nano"
 DEFAULT_STAGE_THREE_REASONING_EFFORT = "high"
-DEFAULT_MIMO_API_BASE = "https://api.xiaomimimo.com/v1/"
 ROOT_DIR = Path(__file__).resolve().parent
 QUERY_SCRIPT_PATH = ROOT_DIR / "supabase" / "query_coarse_units.py"
 DIRECT_NO_MATCH_BASEFORMS = {
@@ -109,8 +108,8 @@ STAGE_ONE_PROMPT = """
 2. 以输入 tokens 为唯一基础单位合并为有意义的语言元素分片; 只能将相邻 tokens 合并，不能改写文本。
 3. 输出必须完整覆盖所有输入 tokens, 输出 token 之间不得重叠、不得跳词、不得打乱顺序。
 4. 合并目标以英语学习为导向：
-   - 固定短语、常见搭配的结构优先合并
-   - 普通自由组合而非常见短语, 不要合并, 保持单个单词独立性
+   - 固定短语、常见语法搭配的结构优先合并
+   - 普通词组不要合并, 保持单个单词独立性
    - 以一个核心单词为主体的词语用法或者语法搭配（如"be addicted to"），应该合并为一个token，在explanation中同时解释短语含义和核心单词，semanticElement.baseForm应为核心词的原形（如"addicted"）。
 6. 对每个输出 token：
    - 提供符合上下文语境的中文翻译和相关解释 explanation
@@ -127,10 +126,10 @@ STAGE_ONE_PROMPT = """
 - "be addicted to" -> explanation: "对...上瘾；addicted表示沉迷的、上瘾的"，baseForm: "addicted"
 
 反面例子(不要合并)：
-- girl group
 - math class
 - in the office
 - software development
+- brains and beauty
 """
 
 STAGE_THREE_SYSTEM_PROMPT = """
@@ -177,7 +176,6 @@ coarse_unit 的含义：
 - sexuality 不能匹配到 sex appeal
 - economic policy 不能直接匹配到 economy
 - angry 不能直接匹配到 upset
-
 """
 
 STAGE_THREE_RULES_PROMPT = """
@@ -192,14 +190,10 @@ STAGE_THREE_RULES_PROMPT = """
 - 你可以明确判断“这个词或短语在这里就是这个意思”
 - 返回 `match` 时，只返回 coarse_id 和 reason
 - 如果你认为有必要优化 token 的 explanation，也可以同时返回完整优化后的 explanation
-- `match` 的输出结构必须是：
-  {"action":"match","coarse_id":123,"reason":"非空原因","explanation":"可选的完整 explanation"}
 
 什么情形下返回 `search`：
 - 当前候选还不足以确认匹配
 - 但你认为继续搜索仍然有意义，且当前 token 更像是一个需要拆开的词组或屈折形式，而不是一个已经很明确的单词
-- `search` 的输出结构必须是：
-  {"action":"search","queries":["query1","query2"],"reason":"非空原因"}
 
 `search` 的用法：
 - `search` 的作用是告诉系统：下一回应该继续精确查询哪些词
@@ -223,8 +217,6 @@ STAGE_THREE_RULES_PROMPT = """
 - 当前候选虽然表面相似，但你无法确认意思一致
 - 继续搜索也不太可能得到更可靠结果
 - 返回 `no_match` 的意思是：当前 token 不应该绑定到任何 coarse_unit
-- `no_match` 的输出结构必须是：
-  {"action":"no_match","reason":"非空原因"}
 
 统一输出要求：
 - 只输出一个 JSON 对象
@@ -404,32 +396,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def is_mimo_model(model_name: str) -> bool:
-    """判断当前模型是否走 MiMo 的 OpenAI 兼容接口。"""
-
-    return model_name.strip().lower().startswith("mimo-v2-")
-
-
-def load_model_provider_config(env_path: Path, model_name: str) -> tuple[str, str | None]:
-    """
-    按模型名加载对应供应商的鉴权配置。
-
-    - OpenAI：读取 OPENAI_API_KEY
-    - MiMo：读取 MIMO_API_KEY，并使用兼容的 base_url
-    """
+def load_openai_api_key(env_path: Path) -> str:
+    """从 `.env` 读取 OpenAI API Key。"""
 
     load_dotenv(env_path)
-
-    if is_mimo_model(model_name):
-        api_key = os.getenv("MIMO_API_KEY")
-        if not api_key:
-            raise ValueError(f"MIMO_API_KEY not found in {env_path}")
-        return api_key, os.getenv("MIMO_API_BASE", DEFAULT_MIMO_API_BASE)
-
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError(f"OPENAI_API_KEY not found in {env_path}")
-    return api_key, None
+    return api_key
 
 
 def create_structured_llm(
@@ -438,30 +412,9 @@ def create_structured_llm(
     reasoning_effort: str,
     schema: type[BaseModel],
 ) -> Any:
-    """
-    创建一个绑定结构化输出 schema 的聊天模型。
+    """创建一个绑定结构化输出 schema 的 OpenAI 聊天模型。"""
 
-    逻辑保持不变，只在底层按模型名切换供应商：
-    - OpenAI：沿用 `reasoning_effort` + `json_schema`
-    - MiMo：使用 OpenAI 兼容 base_url，reasoning 用布尔开关，结构化输出走 `json_mode`
-    """
-
-    api_key, base_url = load_model_provider_config(env_path, model_name)
-
-    if is_mimo_model(model_name):
-        llm = ChatOpenAI(
-            api_key=api_key,
-            model=model_name,
-            openai_api_base=base_url,
-            use_responses_api=False,
-            extra_body={
-                "reasoning": {
-                    "enabled": reasoning_effort.strip().lower()
-                    not in {"none", "off", "disabled", "false", "0"}
-                }
-            },
-        )
-        return llm.with_structured_output(schema, method="json_mode")
+    api_key = load_openai_api_key(env_path)
 
     llm = ChatOpenAI(
         api_key=api_key,
@@ -1365,12 +1318,8 @@ def main() -> None:
     log_step(f"续跑来源：{existing_output_source}")
     log_step(f"阶段 1 模型：{args.stage_one_model}")
     log_step(f"阶段 1 reasoning_effort：{args.stage_one_reasoning_effort}")
-    if is_mimo_model(args.stage_one_model):
-        log_step(f"阶段 1 MiMo base_url：{os.getenv('MIMO_API_BASE', DEFAULT_MIMO_API_BASE)}")
     log_step(f"阶段 3 模型：{args.stage_three_model}")
     log_step(f"阶段 3 reasoning_effort：{args.stage_three_reasoning_effort}")
-    if is_mimo_model(args.stage_three_model):
-        log_step(f"阶段 3 MiMo base_url：{os.getenv('MIMO_API_BASE', DEFAULT_MIMO_API_BASE)}")
     log_step(f"总句子数：{len(input_sentences)}")
     log_step(f"已完成到 sentence.index：{last_completed_index}")
     log_step(f"剩余句子数：{len(remaining_sentences)}")
