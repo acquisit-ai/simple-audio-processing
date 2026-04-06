@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -42,6 +43,60 @@ DEFAULT_STAGE_ONE_MODEL = "gpt-5.4-mini"
 DEFAULT_STAGE_THREE_MODEL = "gpt-5.4-mini"
 ROOT_DIR = Path(__file__).resolve().parent
 QUERY_SCRIPT_PATH = ROOT_DIR / "supabase" / "query_coarse_units.py"
+DIRECT_NO_MATCH_BASEFORMS = {
+    "a", "an", "the",
+    "and", "or", "but", "if",
+    "as", "than", "that", "which", "who", "whom", "whose",
+    "is", "am", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "done", "doing",
+    "have", "has", "had", "having",
+    "can", "could", "may", "must",
+    "not", "no", "yes",
+    "he", "his", "him",
+    "she", "her", "hers",
+    "they", "their", "theirs", "them",
+    "we", "our", "ours", "us",
+    "you", "your", "yours",
+    "it", "its",
+    "i", "me", "my", "mine",
+    "this", "these", "that", "those",
+    "there", "here",
+    "of", "to", "in", "on", "at", "for", "with", "from", "by",
+    "up", "down", "out", "off",
+    "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves",
+}
+DIRECT_NO_MATCH_REASON = (
+    "当前 token 属于过于简单、极高频、低学习价值的基础功能词或代词，"
+    "不进入 coarse_unit 映射，直接按 no_match 处理。"
+)
+
+
+def log_header(title: str) -> None:
+    """打印一级标题，便于在长时间运行时快速定位当前阶段。"""
+
+    print(f"\n=== {title} ===", flush=True)
+
+
+def log_step(message: str, indent: int = 0) -> None:
+    """打印带缩进的步骤日志。"""
+
+    prefix = "  " * indent
+    print(f"{prefix}{message}", flush=True)
+
+
+def shorten_text(value: str, limit: int = 48) -> str:
+    """缩短过长文本，避免命令行进度输出过宽。"""
+
+    normalized = normalize_whitespace(value)
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def count_tokens_in_batch(batch_output: dict[str, Any]) -> int:
+    """统计一个批次中 token 总数，用于进度打印。"""
+
+    return sum(len(sentence.get("tokens", [])) for sentence in batch_output.get("sentences", []))
 
 STAGE_ONE_PROMPT = """
 请将英文文本进行结构化分析，并严格按输入 token 顺序完成语言分片与解释生成。
@@ -53,7 +108,7 @@ STAGE_ONE_PROMPT = """
 4. 合并目标以英语学习为导向：
    - 固定短语、常见搭配、需要整体理解的结构优先合并
    - 普通自由组合, 或者单个值得学习的单词不要强行合并
-   - 对于难度稍高的词组（如"be addicted to"），应该作为一个token，在explanation中同时解释短语含义和核心单词，semanticElement.baseForm应为核心词的原形（如"addicted"）。
+   - 对于难度稍高的词组（如"be addicted to"），应该合并为一个token，在explanation中同时解释短语含义和核心单词，semanticElement.baseForm应为核心词的原形（如"addicted"）。
 6. 对每个输出 token：
    - 提供符合上下文语境的中文翻译/解释 explanation
    - 生成 semanticElement.baseForm 单词的原形（running -> run，studies -> study)
@@ -66,7 +121,6 @@ STAGE_ONE_PROMPT = """
 - "at the same time" -> 固定短语
 - "looking forward to" -> 固定搭配
 - "be addicted to" -> explanation: "对...上瘾；addicted表示沉迷的、上瘾的"，baseForm: "addicted"
-- "get rid of" -> explanation: "摆脱、除去；rid表示使摆脱"，baseForm: "rid"
 
 反面例子(不要合并)：
 - I am happy
@@ -75,20 +129,20 @@ STAGE_ONE_PROMPT = """
 """
 
 STAGE_THREE_SYSTEM_PROMPT = """
-你的任务是：根据当前单词或短语在具体句子里的意思，从给定 coarse_unit 候选中选择最匹配的一个具体义项。
 
-请把 coarse_unit 理解为“可学习语义单元”：
-- 它可以对应单词
-- 也可以对应短语
+任务：根据当前单词或短语在具体句子里的意思，从给定 coarse_unit 候选中选择最匹配的一个具体义项。
+
+coarse_unit 的含义：
+- 它可以对应单词, 也可以对应短语
 - 它表示的是某个单词或短语在具体语境中的一个具体意思
 
-重点不是匹配表面字符串，而是匹配“这个词或短语在这里到底是什么意思”。
+核心原则：
+- 重点不是匹配表面字符串，而是匹配“这个词或短语在这里到底是什么意思”
+- 如果当前候选里已经有可靠匹配，就选出最合适的那个 coarse_unit
+- 如果当前候选还不足以确认匹配，就给出下一步更合适的搜索词
 
+单词义项示例：
 同一个单词如果意思差别很大，通常对应不同 coarse_unit。
-例如：
-- bank
-  - I deposited money in the bank. -> 金融机构
-  - We sat on the river bank. -> 河岸
 - light
   - Turn on the light. -> 灯
   - This bag is light. -> 轻的
@@ -96,7 +150,7 @@ STAGE_THREE_SYSTEM_PROMPT = """
   - I run every morning. -> 跑步
   - She runs the company. -> 经营、管理
 
-短语也一样要按具体意思判断：
+短语义项示例：
 - take off
   - The plane took off. -> 起飞
   - He took off his jacket. -> 脱下
@@ -104,11 +158,21 @@ STAGE_THREE_SYSTEM_PROMPT = """
   - I work out at the gym. -> 锻炼
   - We need to work out the problem. -> 解决、想出办法
 
-你需要做的事只有两类：
-- 如果当前候选里已经有可靠匹配，就选出最合适的那个 coarse_unit
-- 如果当前候选还不足以确认匹配，就给出下一步更合适的搜索词
+匹配边界：
+- 匹配时不需要过度纠结极细的词典颗粒度；只要当前语境下的核心意思足够接近，就可以认为是可靠匹配
+- 重点是避免明显的语义错绑，而不是追求过度苛刻的细粒度区分
 
-判断时必须优先看语义是否一致，而不是只看字符串是否相似。
+正面例子：
+- legend 在语境里表示“传奇人物”时，如果当前候选更接近“传奇 / 被广泛传颂的对象”这一核心意思，也可以接受
+- 可以接受同一具体意思下、颗粒度略有粗细差别的匹配
+
+反面例子：
+- 这里不是做近义词联想匹配，也不是只要主题相关就可以匹配
+- 不接受相关概念、主题相关或近义词替代式的匹配
+- sexuality 不能匹配到 sex appeal
+- economic policy 不能直接匹配到 economy
+- angry 不能直接匹配到 upset
+
 """
 
 STAGE_THREE_RULES_PROMPT = """
@@ -126,18 +190,23 @@ STAGE_THREE_RULES_PROMPT = """
 
 什么情形下返回 `search`：
 - 当前候选还不足以确认匹配
-- 但你认为继续搜索仍然有意义，可能找到更合适的义项
+- 但你认为继续搜索仍然有意义，且当前 token 更像是一个需要拆开的词组或屈折形式，而不是一个已经很明确的单词
 
 `search` 的用法：
-- `search` 的作用是告诉系统：下一回应该查哪些词，以及用什么方式查
-- `search.mode = exact`
-  - 表示下一回做大小写不敏感的精确匹配
-  - 适合查你已经比较确定的词或短语
-- `search.mode = contain`
-  - 表示下一回做包含匹配
-  - 适合在精确匹配找不到时扩大范围查相近表达
+- `search` 的作用是告诉系统：下一回应该继续精确查询哪些词
+- 对大部分单词，第一次精确搜索就已经足够；可以直接 match/no_match，通常不应再返回 `search`
+- 词组或变形表达，才适合继续搜索更短、更核心或更标准的精确查询词
+- 新查询词应尽量朝“核心词 / 更标准写法 / 去掉不必要修饰”收缩，而不是保留整段原短语继续绕圈搜索
+- 不要把整句里的额外修饰词一起带入搜索
+- 合理例子：
+  - `be addicted to` -> 可以继续查 `addicted to`、`addicted`、`addict`
+  - `setting up` -> 可以继续查 `set up`、`set`
+- 不合理例子：
+  - `sexuality` 第一次精确搜索通常就应直接 `match/no_match`，不应继续扩展成别的词
+  - `economic` 第一次精确搜索通常也应直接 `match/no_match`
 - `search.queries`
-  - 应该是你建议系统继续查询的词或短语
+  - 应该是你建议系统继续做精确匹配的词或短语
+  - 最多提供 4 个
 
 什么情形下返回 `no_match`：
 - 已经到最后一回，仍然没有语义可靠的候选
@@ -184,12 +253,11 @@ class StageThreeDecision(BaseModel):
     LLM 在第三阶段只允许做三种事：
     - `match`：从当前数据库候选里选一个 coarse_id
     - `search`：给出下一回搜索建议
-    - `no_match`：在第三回后或非法重试后结束当前 token
+    - `no_match`：在继续搜索意义不大或非法重试后结束当前 token
     """
 
     action: Literal["match", "search", "no_match"]
     coarse_id: int | None = None
-    mode: Literal["exact", "contain"] | None = None
     queries: list[str] | None = None
     reason: str
     explanation: str | None = None
@@ -324,7 +392,7 @@ def create_structured_llm(api_key: str, model_name: str, schema: type[BaseModel]
     llm = ChatOpenAI(
         api_key=api_key,
         model=model_name,
-        reasoning_effort="medium",
+        reasoning_effort="low",
     )
     return llm.with_structured_output(schema)
 
@@ -340,6 +408,13 @@ def normalize_whitespace(value: str) -> str:
     return " ".join(value.split())
 
 
+def normalize_lookup_text(value: str) -> str:
+    """把 token.text / baseForm 归一化成便于停用词判断的键。"""
+
+    lowered = normalize_whitespace(value).lower().strip()
+    return re.sub(r"^[^\w]+|[^\w]+$", "", lowered)
+
+
 def dedupe_queries(queries: list[str]) -> list[str]:
     """按首次出现顺序对查询词去重。"""
 
@@ -347,6 +422,34 @@ def dedupe_queries(queries: list[str]) -> list[str]:
     seen: set[str] = set()
     for raw_query in queries:
         query = normalize_whitespace(raw_query.strip())
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        deduped.append(query)
+    return deduped
+
+
+def normalize_llm_search_query(value: str) -> str:
+    """
+    清洗 LLM 返回的 search query。
+
+    用户要求仅对模型返回的 search query 做这一步：
+    1. 全部转小写
+    2. 如果首字符或尾字符不是字母/数字，则删除
+    3. 再做空白压缩
+    """
+
+    normalized = normalize_whitespace(value).lower().strip()
+    return re.sub(r"^[^a-z0-9]+|[^a-z0-9]+$", "", normalized)
+
+
+def normalize_llm_search_queries(queries: list[str]) -> list[str]:
+    """按首次出现顺序清洗并去重 LLM 返回的 search queries。"""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_query in queries:
+        query = normalize_llm_search_query(raw_query)
         if not query or query in seen:
             continue
         seen.add(query)
@@ -510,7 +613,7 @@ def run_stage_one_with_retry(
         except Exception as exc:
             last_error = exc
             if attempt == 0:
-                print(f"  第一阶段请求或第二阶段校验失败，按一次失败处理并重试一次：{exc}")
+                log_step(f"[阶段 1/2] 首次执行失败，准备重试一次：{exc}", indent=1)
                 continue
             raise
 
@@ -539,6 +642,20 @@ def build_token_payload(token_runtime: TokenRuntime) -> dict[str, Any]:
     }
 
 
+def format_token_progress(
+    token_runtime: TokenRuntime,
+    token_position: int,
+    total_tokens: int,
+) -> str:
+    """生成命令行中的 token 进度标签。"""
+
+    token_text = shorten_text(str(token_runtime.token.get("text", "")))
+    return (
+        f"[Token {token_position}/{total_tokens}] "
+        f"句子 {token_runtime.sentence_index} / token {token_runtime.token_index} / {token_text}"
+    )
+
+
 def build_current_round_instruction(round_no: int) -> str:
     """构造“当前这一轮是什么输入、允许返回什么”的动态说明。"""
 
@@ -546,12 +663,13 @@ def build_current_round_instruction(round_no: int) -> str:
         return """当前这一轮的输入：
 - 你会看到当前 token
 - 你会看到当前句子
-- 你会看到系统已经自动执行的第 1 回搜索结果：search(token.text, baseForm)
+- 你会看到系统已经自动执行的第 1 回搜索结果：token.text + baseForm
 
 这一轮允许的输出：
 - 如果当前候选已经足够可靠，返回 `match`
 - 如果当前候选还不够，但继续搜索有意义，返回 `search`
-- 这一轮不要返回 `no_match`
+- 如果你已经判断继续搜索意义不大，也可以直接返回 `no_match`
+
 """
 
     if round_no == 2:
@@ -563,9 +681,8 @@ def build_current_round_instruction(round_no: int) -> str:
 
 这一轮允许的输出：
 - 如果当前候选已经足够可靠，返回 `match`
-- 如果仍需继续搜索，返回 `search`
-- 此时 `search.mode` 只能是 `contain`
-- 这一轮不要返回 `no_match`
+- 如果当前候选还不够，但继续搜索有意义，返回 `search`
+- 如果你已经判断继续搜索意义不大，也可以直接返回 `no_match`
 """
 
     return """当前这一轮的输入：
@@ -577,7 +694,7 @@ def build_current_round_instruction(round_no: int) -> str:
 这一轮允许的输出：
 - 如果当前候选已经足够可靠，返回 `match`
 - 如果仍然无法可靠匹配，返回 `no_match`
-- 这一轮不要返回 `search`
+- 不要返回 `search`
 """
 
 
@@ -683,9 +800,8 @@ def validate_stage_three_decision(
     关键校验点：
     - `reason` 必须非空
     - `match` 的 id 必须存在于当前候选中
-    - 第二回搜索必须是 `exact`
-    - 第三回搜索必须是 `contain`
-    - `no_match` 只能出现在第三回之后
+    - `search` 不再区分 mode，只允许继续给出精确查询词
+    - `no_match` 允许提前出现，用于简单高频且无需映射的 token
     """
 
     current_round = rounds[-1]
@@ -703,17 +819,10 @@ def validate_stage_three_decision(
         return True, ""
 
     if decision.action == "search":
-        if current_round.round_no == 1:
-            expected_mode = "exact"
-        elif current_round.round_no == 2:
-            expected_mode = "contain"
-        else:
+        if current_round.round_no not in {1, 2}:
             return False, "search is not allowed after round 3"
 
-        if decision.mode != expected_mode:
-            return False, f"search mode must be {expected_mode} in this round"
-
-        normalized_queries = dedupe_queries(decision.queries or [])
+        normalized_queries = normalize_llm_search_queries(decision.queries or [])
         if not normalized_queries:
             return False, "search requires at least one non-empty query"
         if len(normalized_queries) > 4:
@@ -722,8 +831,6 @@ def validate_stage_three_decision(
         return True, ""
 
     if decision.action == "no_match":
-        if current_round.round_no != 3:
-            return False, "no_match is only allowed after round 3"
         return True, ""
 
     return False, "unsupported action"
@@ -842,6 +949,8 @@ def process_single_token(
     audit_logger: AuditLogger,
     shared_context: dict[str, Any],
     token_runtime: TokenRuntime,
+    token_position: int,
+    total_tokens: int,
 ) -> None:
     """
     对单个 token 执行完整的第三阶段流程。
@@ -849,12 +958,44 @@ def process_single_token(
     轮次顺序：
     1. 自动 exact(token.text, baseForm)
     2. 如有需要，使用 agent 给出的 exact 查询词
-    3. 如仍有需要，使用 agent 给出的 contain 查询词
+    3. 如仍有需要，继续使用 agent 给出的 exact 查询词
 
     当前 token 结束后：
     - 写入一条审计记录
     - 返回上层，由上层切回新的 `H + A` 分支再处理下一个 token
     """
+
+    token_progress = format_token_progress(token_runtime, token_position, total_tokens)
+    log_step(token_progress, indent=1)
+
+    semantic_element = ensure_semantic_element(token_runtime.token)
+    lookup_values = {
+        normalize_lookup_text(str(token_runtime.token.get("text", ""))),
+        normalize_lookup_text(str(semantic_element.get("baseForm", ""))),
+    }
+    lookup_values.discard("")
+
+    # 对于固定的一小批基础功能词 / 代词，不进入数据库查询和 LLM 判断，
+    # 直接按 no_match 处理，减少无意义搜索。
+    if lookup_values & DIRECT_NO_MATCH_BASEFORMS:
+        log_step("[阶段 3] 命中直接 no_match 词表，跳过数据库查询和 LLM。", indent=2)
+        final_action, final_coarse_id, final_reason = finalize_no_match(
+            token_runtime,
+            DIRECT_NO_MATCH_REASON,
+        )
+        audit_logger.write(
+            {
+                "sentence_index": token_runtime.sentence_index,
+                "token_index": token_runtime.token_index,
+                "token_text": token_runtime.token.get("text"),
+                "final_action": final_action,
+                "final_coarse_id": final_coarse_id,
+                "final_reason": final_reason,
+                "rounds": [],
+            }
+        )
+        log_step(f"[完成] {final_action} | coarse_id=None", indent=2)
+        return
 
     rounds: list[SearchRoundRecord] = []
 
@@ -866,48 +1007,49 @@ def process_single_token(
             str(token_runtime.token.get("semanticElement", {}).get("baseForm", "")),
         ]
     )
-    rounds.append(
-        SearchRoundRecord(
-            round_no=1,
-            mode="exact",
-            queries=round1_queries,
-            results=query_runner.run("exact", round1_queries),
-        )
+    log_step(f"[搜索 1/3] exact -> {round1_queries}", indent=2)
+    round1_record = SearchRoundRecord(
+        round_no=1,
+        mode="exact",
+        queries=round1_queries,
+        results=query_runner.run("exact", round1_queries),
     )
+    rounds.append(round1_record)
+    log_step(f"[搜索 1/3] 候选数：{round1_record.candidate_count}", indent=2)
     decision = ask_stage_three_with_retry(stage_three_llm, shared_context, token_runtime, rounds)
+    log_step(f"[决策 1/3] {decision.action}", indent=2)
 
     if decision.action == "match":
         final_action, final_coarse_id, final_reason = finalize_match(token_runtime, decision, rounds)
     else:
         if decision.action == "search":
-            rounds.append(
-                SearchRoundRecord(
-                    round_no=2,
-                    mode="exact",
-                    queries=decision.queries or [],
-                    results=query_runner.run("exact", decision.queries or []),
-                )
+            log_step(f"[搜索 2/3] exact -> {decision.queries or []}", indent=2)
+            round2_record = SearchRoundRecord(
+                round_no=2,
+                mode="exact",
+                queries=decision.queries or [],
+                results=query_runner.run("exact", decision.queries or []),
             )
+            rounds.append(round2_record)
+            log_step(f"[搜索 2/3] 候选数：{round2_record.candidate_count}", indent=2)
             decision = ask_stage_three_with_retry(stage_three_llm, shared_context, token_runtime, rounds)
-        else:
-            decision = StageThreeDecision(
-                action="no_match",
-                reason=f"第 1 回未给出合法继续动作，按失败流程处理：{decision.reason}",
-            )
+            log_step(f"[决策 2/3] {decision.action}", indent=2)
 
         if decision.action == "match":
             final_action, final_coarse_id, final_reason = finalize_match(token_runtime, decision, rounds)
         else:
             if decision.action == "search":
-                rounds.append(
-                    SearchRoundRecord(
-                        round_no=3,
-                        mode="contain",
-                        queries=decision.queries or [],
-                        results=query_runner.run("contain", decision.queries or []),
-                    )
+                log_step(f"[搜索 3/3] exact -> {decision.queries or []}", indent=2)
+                round3_record = SearchRoundRecord(
+                    round_no=3,
+                    mode="exact",
+                    queries=decision.queries or [],
+                    results=query_runner.run("exact", decision.queries or []),
                 )
+                rounds.append(round3_record)
+                log_step(f"[搜索 3/3] 候选数：{round3_record.candidate_count}", indent=2)
                 decision = ask_stage_three_with_retry(stage_three_llm, shared_context, token_runtime, rounds)
+                log_step(f"[决策 3/3] {decision.action}", indent=2)
 
             if decision.action == "match":
                 final_action, final_coarse_id, final_reason = finalize_match(token_runtime, decision, rounds)
@@ -916,6 +1058,11 @@ def process_single_token(
                 if not no_match_reason:
                     no_match_reason = "三回搜索后未得到可靠匹配。"
                 final_action, final_coarse_id, final_reason = finalize_no_match(token_runtime, no_match_reason)
+
+    log_step(
+        f"[完成] {final_action} | coarse_id={final_coarse_id if final_coarse_id is not None else 'None'}",
+        indent=2,
+    )
 
     # 审计文件是追加写入，并且按文档要求在流程结束后保留。
     audit_logger.write(
@@ -954,8 +1101,21 @@ def process_stage_three_batch(
     """
 
     shared_context = json.loads(json.dumps(batch_output, ensure_ascii=False))
+    total_tokens = count_tokens_in_batch(batch_output)
+    processed_tokens = 0
+
+    log_step(
+        f"[阶段 3] 开始 coarse_unit 映射：{len(batch_output.get('sentences', []))} 句，{total_tokens} 个 token",
+        indent=1,
+    )
+
     for sentence in batch_output.get("sentences", []):
+        log_step(
+            f"[句子] index={sentence['index']} | {shorten_text(sentence['text'], limit=72)}",
+            indent=1,
+        )
         for token in sentence.get("tokens", []):
+            processed_tokens += 1
             token_runtime = TokenRuntime(
                 sentence_index=sentence["index"],
                 token_index=token["index"],
@@ -968,6 +1128,8 @@ def process_stage_three_batch(
                 audit_logger=audit_logger,
                 shared_context=shared_context,
                 token_runtime=token_runtime,
+                token_position=processed_tokens,
+                total_tokens=total_tokens,
             )
     return batch_output
 
@@ -1075,7 +1237,8 @@ def main() -> None:
     remaining_sentences = [sentence for sentence in input_sentences if sentence["index"] > last_completed_index]
 
     if not remaining_sentences:
-        print("No remaining sentences to process.")
+        log_header("执行完成")
+        log_step("没有剩余句子需要处理。")
         return
 
     # 审计文件名由文档固定，并且流程结束后不清理。
@@ -1085,16 +1248,29 @@ def main() -> None:
     batches = chunk_sentences(remaining_sentences, args.batch_size)
     total_batches = len(batches)
 
-    print(f"Remaining sentences: {len(remaining_sentences)}")
-    print(f"Total batches: {total_batches}")
+    log_header("启动信息")
+    log_step(f"输入文件：{args.input_json}")
+    log_step(f"输出文件：{args.output_json}")
+    log_step(f"审计文件：{audit_path}")
+    log_step(f"总句子数：{len(input_sentences)}")
+    log_step(f"已完成到 sentence.index：{last_completed_index}")
+    log_step(f"剩余句子数：{len(remaining_sentences)}")
+    log_step(f"批次数：{total_batches}")
+    log_step(f"批次大小：{args.batch_size}")
 
     for batch_idx, batch in enumerate(batches, start=1):
         sentence_range = f"{batch[0]['index']}..{batch[-1]['index']}"
-        print(f"Processing batch {batch_idx}/{total_batches} (sentences {sentence_range})")
+        log_header(f"批次 {batch_idx}/{total_batches}")
+        log_step(f"句子范围：{sentence_range}")
+        log_step(f"句子数量：{len(batch)}")
+        log_step(f"[阶段 0] 清洗输入并准备第一阶段请求", indent=1)
 
         # 先跑阶段 0 + 1 + 2。如果两次校验都失败，异常会直接终止程序，
         # 当前批次不会被写入输出文件。
+        log_step("[阶段 1] 调用 LLM 生成结构化分片", indent=1)
+        log_step("[阶段 2] 代码侧校验并补 token.index", indent=1)
         batch_stage_two_output = run_stage_one_with_retry(stage_one_llm, batch)
+        log_step("[阶段 1/2] 完成", indent=1)
 
         # 再跑阶段 3。当前批次里的每个 token 都有自己独立的 1->2->3 搜索流程，
         # 同时各自写一条审计记录。
@@ -1114,14 +1290,21 @@ def main() -> None:
             payload=create_final_payload(accumulated_sentences),
         )
 
-        print(f"  saved batch {batch_idx}/{total_batches} to {args.output_json}")
+        log_step(
+            f"[保存] 已写入批次 {batch_idx}/{total_batches}，累计句子数：{len(accumulated_sentences)}",
+            indent=1,
+        )
+        log_step(f"[保存] 输出文件：{args.output_json}", indent=1)
 
-    print("Processing completed.")
+    log_header("执行完成")
+    log_step(f"累计输出句子数：{len(accumulated_sentences)}")
+    log_step(f"最终输出：{args.output_json}")
 
 
 if __name__ == "__main__":
     try:
         main()
     except (ValidationError, ValueError, FileNotFoundError, subprocess.CalledProcessError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print("\n=== 执行失败 ===", file=sys.stderr, flush=True)
+        print(f"错误信息：{exc}", file=sys.stderr, flush=True)
         raise SystemExit(1) from exc
