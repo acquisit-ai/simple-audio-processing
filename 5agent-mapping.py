@@ -1250,6 +1250,82 @@ def validate_input_payload(input_payload: dict[str, Any]) -> list[dict[str, Any]
     return sentences
 
 
+def attach_timing_info(
+    input_sentences: list[dict[str, Any]],
+    output_sentences: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    在正式输出前，按原始输入回填句子与 token 的 start/end 时间。
+
+    规则：
+    - 句子的 start/end 直接沿用原始输入句子
+    - token 的 start/end 通过最终 token.text 再次顺序对齐原始 token 列表
+    - 如果某个句子里某个 token 无法对齐，则当前句子中该 token 以及其后的 token 都写入空时间
+    - 只在全部批次完成后的正式输出阶段执行，中间文件不写入这些时间字段
+    """
+
+    input_by_index = {sentence["index"]: sentence for sentence in input_sentences}
+    timed_sentences: list[dict[str, Any]] = []
+
+    for output_sentence in output_sentences:
+        sentence_index = output_sentence["index"]
+        input_sentence = input_by_index.get(sentence_index)
+        if input_sentence is None:
+            raise ValueError(f"Cannot find source sentence for index={sentence_index}")
+
+        timed_sentence = json.loads(json.dumps(output_sentence, ensure_ascii=False))
+        if "start" in input_sentence:
+            timed_sentence["start"] = input_sentence["start"]
+        if "end" in input_sentence:
+            timed_sentence["end"] = input_sentence["end"]
+
+        source_tokens = input_sentence.get("tokens", [])
+        cursor = 0
+        timed_tokens: list[dict[str, Any]] = []
+        alignment_failed = False
+
+        for output_token in timed_sentence.get("tokens", []):
+            if alignment_failed:
+                output_token["start"] = None
+                output_token["end"] = None
+                timed_tokens.append(output_token)
+                continue
+
+            token_text = normalize_whitespace(str(output_token.get("text", "")).strip())
+            if not token_text:
+                output_token["start"] = None
+                output_token["end"] = None
+                timed_tokens.append(output_token)
+                alignment_failed = True
+                continue
+
+            matched = False
+            for end in range(cursor + 1, len(source_tokens) + 1):
+                candidate = normalize_whitespace(" ".join(token["text"] for token in source_tokens[cursor:end]))
+                if candidate == token_text:
+                    first_source = source_tokens[cursor]
+                    last_source = source_tokens[end - 1]
+                    if "start" in first_source:
+                        output_token["start"] = first_source["start"]
+                    if "end" in last_source:
+                        output_token["end"] = last_source["end"]
+                    timed_tokens.append(output_token)
+                    cursor = end
+                    matched = True
+                    break
+
+            if not matched:
+                output_token["start"] = None
+                output_token["end"] = None
+                timed_tokens.append(output_token)
+                alignment_failed = True
+
+        timed_sentence["tokens"] = timed_tokens
+        timed_sentences.append(timed_sentence)
+
+    return timed_sentences
+
+
 def create_final_payload(sentences: list[dict[str, Any]]) -> dict[str, Any]:
     """把累计句子列表包装成最终输出 JSON 结构。"""
 
@@ -1371,7 +1447,8 @@ def main() -> None:
             "treating run as failed and not saving final output"
         )
 
-    final_payload = create_final_payload(accumulated_sentences)
+    timed_sentences = attach_timing_info(input_sentences, accumulated_sentences)
+    final_payload = create_final_payload(timed_sentences)
     atomic_write_json(
         target_path=args.output_json,
         temp_dir=args.output_json.parent,
