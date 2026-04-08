@@ -1471,11 +1471,15 @@ def process_token(token_runtime, shared_context_A):
     {
       "index": 0,
       "text": "句子原文",
+      "start": 13054,
+      "end": 16441,
       "explanation": "整句中文解释",
       "tokens": [
         {
           "index": 0,
           "text": "token 文本",
+          "start": 13054,
+          "end": 13391,
           "explanation": "最终上下文解释",
           "semanticElement": {
             "coarse_id": 166670,
@@ -1561,11 +1565,15 @@ python3 supabase/query_coarse_units.py exact apple pear "be addicted to"
     {
       "index": 0,
       "text": "Okay, so what is it that you wanted to talk to me about?",
+      "start": 13054,
+      "end": 16441,
       "explanation": "好吧，所以你到底是想跟我谈什么呢？",
       "tokens": [
         {
           "index": 0,
           "text": "Okay,",
+          "start": 13054,
+          "end": 13391,
           "explanation": "好吧，表示接受对方继续说，或引出接下来的话。",
           "semanticElement": {
             "coarse_id": 92341,
@@ -1577,6 +1585,8 @@ python3 supabase/query_coarse_units.py exact apple pear "be addicted to"
         {
           "index": 4,
           "text": "wanted to",
+          "start": 15109,
+          "end": 15786,
           "explanation": "想要，当时想要，表示过去的意图或愿望。",
           "semanticElement": {
             "coarse_id": 166670,
@@ -1588,6 +1598,8 @@ python3 supabase/query_coarse_units.py exact apple pear "be addicted to"
         {
           "index": 7,
           "text": "about?",
+          "start": 16201,
+          "end": 16441,
           "explanation": "关于……，用于询问谈话的主题或内容。",
           "semanticElement": {
             "coarse_id": null,
