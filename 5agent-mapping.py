@@ -110,11 +110,11 @@ STAGE_ONE_PROMPT = """
 4. 合并目标以英语学习为导向：
    - 固定短语、常见语法搭配的结构优先合并
    - 普通词组不要合并, 保持单个单词独立性
-   - 以一个核心单词为主体的词语用法或者语法搭配（如"be addicted to"），应该合并为一个token，在explanation中同时解释短语含义和核心单词，semanticElement.baseForm应为核心词的原形（如"addicted"）。
+   - 以一个核心单词为主体的词语用法或者语法搭配（如"be addicted to"），应该合并为一个token，在explanation中同时解释短语含义和核心单词，semantic_element.base_form应为核心词的原形（如"addicted"）。
 6. 对每个输出 token：
    - 提供符合上下文语境的中文翻译和相关解释 explanation
-   - 生成 semanticElement.baseForm 单词的原形（running -> run，studies -> study), 或者短语无时态形式(looking forward to -> look forward to)
-   - 生成 semanticElement.dictionary 上下文无关词典释义
+   - 生成 semantic_element.base_form 单词的原形（running -> run，studies -> study), 或者短语无时态形式(looking forward to -> look forward to)
+   - 生成 semantic_element.dictionary 上下文无关词典释义
 7. 你必须保持输出句子和 tokens 顺序与输入完全一致。
 
 正面例子(建议合并)：
@@ -123,7 +123,7 @@ STAGE_ONE_PROMPT = """
 - "at the same time" -> 固定短语
 - "look forward to" -> 固定搭配
 - "break down" -> 固定搭配
-- "be addicted to" -> explanation: "对...上瘾；addicted表示沉迷的、上瘾的"，baseForm: "addicted"
+- "be addicted to" -> explanation: "对...上瘾；addicted表示沉迷的、上瘾的"，base_form: "addicted"
 
 反面例子(不要合并)：
 - math class
@@ -229,7 +229,7 @@ STAGE_THREE_RULES_PROMPT = """
 class StageOneSemanticElement(BaseModel):
     """第一阶段产出的语义字段，此时还没有做数据库映射。"""
 
-    baseForm: str
+    base_form: str
     dictionary: str
 
 
@@ -238,7 +238,7 @@ class StageOneToken(BaseModel):
 
     text: str
     explanation: str
-    semanticElement: StageOneSemanticElement
+    semantic_element: StageOneSemanticElement
 
 
 class StageOneSentence(BaseModel):
@@ -436,7 +436,7 @@ def normalize_whitespace(value: str) -> str:
 
 
 def normalize_lookup_text(value: str) -> str:
-    """把 token.text / baseForm 归一化成便于停用词判断的键。"""
+    """把 token.text / base_form 归一化成便于停用词判断的键。"""
 
     lowered = normalize_whitespace(value).lower().strip()
     return re.sub(r"^[^\w]+|[^\w]+$", "", lowered)
@@ -691,7 +691,7 @@ def build_current_round_instruction(round_no: int) -> str:
         return """当前这一轮的输入：
 - 你会看到当前 token
 - 你会看到当前句子
-- 你会看到系统已经自动执行的第 1 回搜索结果：token.text + baseForm
+- 你会看到系统已经自动执行的第 1 回搜索结果：token.text + base_form
 
 这一轮允许的输出：
 - 如果当前候选已经足够可靠，返回 `match`
@@ -912,11 +912,11 @@ def ask_stage_three_with_retry(
 
 
 def ensure_semantic_element(token: dict[str, Any]) -> dict[str, Any]:
-    """确保输出 token 上存在可修改的 semanticElement 对象。"""
+    """确保输出 token 上存在可修改的 semantic_element 对象。"""
 
-    semantic_element = token.setdefault("semanticElement", {})
+    semantic_element = token.setdefault("semantic_element", {})
     if not isinstance(semantic_element, dict):
-        raise ValueError("semanticElement must be an object")
+        raise ValueError("semantic_element must be an object")
     return semantic_element
 
 
@@ -931,7 +931,7 @@ def finalize_match(
     关键点：最终数据库真值不是由 LLM 自己写，而是由控制器读取当前匹配到的
     数据库候选后回填：
     - coarse_id <- candidate.id
-    - baseForm <- candidate.label
+    - base_form <- candidate.label
     - dictionary <- candidate.chinese_def
     - reason <- decision.reason
 
@@ -942,7 +942,7 @@ def finalize_match(
     matched = current_candidates[decision.coarse_id]
     semantic_element = ensure_semantic_element(token_runtime.token)
     semantic_element["coarse_id"] = matched["id"]
-    semantic_element["baseForm"] = matched["label"]
+    semantic_element["base_form"] = matched["label"]
     semantic_element["dictionary"] = matched.get("chinese_def") or semantic_element.get("dictionary", "")
     semantic_element["reason"] = decision.reason.strip()
 
@@ -961,7 +961,7 @@ def finalize_no_match(
 
     按文档要求：
     - coarse_id 设为 null
-    - 第一阶段的 baseForm 和 dictionary 保持不变
+    - 第一阶段的 base_form 和 dictionary 保持不变
     - reason 仍然必须写入
     """
 
@@ -984,7 +984,7 @@ def process_single_token(
     对单个 token 执行完整的第三阶段流程。
 
     轮次顺序：
-    1. 自动 exact(token.text, baseForm)
+    1. 自动 exact(token.text, base_form)
     2. 如有需要，使用 agent 给出的 exact 查询词
     3. 如仍有需要，继续使用 agent 给出的 exact 查询词
 
@@ -999,7 +999,7 @@ def process_single_token(
     semantic_element = ensure_semantic_element(token_runtime.token)
     lookup_values = {
         normalize_lookup_text(str(token_runtime.token.get("text", ""))),
-        normalize_lookup_text(str(semantic_element.get("baseForm", ""))),
+        normalize_lookup_text(str(semantic_element.get("base_form", ""))),
     }
     lookup_values.discard("")
 
@@ -1027,12 +1027,12 @@ def process_single_token(
 
     rounds: list[SearchRoundRecord] = []
 
-    # 第一回永远是自动搜索。即使同时查 token.text 和 baseForm，
+    # 第一回永远是自动搜索。即使同时查 token.text 和 base_form，
     # 在文档语义里也只算一回搜索。
     round1_queries = dedupe_queries(
         [
             str(token_runtime.token.get("text", "")),
-            str(token_runtime.token.get("semanticElement", {}).get("baseForm", "")),
+            str(token_runtime.token.get("semantic_element", {}).get("base_form", "")),
         ]
     )
     log_step(f"[搜索 1/3] exact -> {round1_queries}", indent=2)
