@@ -59,6 +59,7 @@ def slice_transcript_for_clip(
     transcript_data: dict,
     start_index: int,
     end_index: int,
+    time_offset_ms: int = 0,
 ) -> dict:
     ordered_sentences, sentence_position_map = build_sentence_lookup(transcript_data)
 
@@ -79,11 +80,13 @@ def slice_transcript_for_clip(
     for new_sentence_index, sentence in enumerate(selected_sentences):
         sentence_copy = copy.deepcopy(sentence)
         sentence_copy["index"] = new_sentence_index
+        rebase_timing_fields(sentence_copy, time_offset_ms)
 
         if "tokens" in sentence_copy and isinstance(sentence_copy["tokens"], list):
             for new_token_index, token in enumerate(sentence_copy["tokens"]):
                 if isinstance(token, dict):
                     token["index"] = new_token_index
+                    rebase_timing_fields(token, time_offset_ms)
 
         clip_sentences.append(sentence_copy)
 
@@ -99,6 +102,15 @@ def slice_transcript_for_clip(
         )
 
     return clip_transcript
+
+
+def rebase_timing_fields(payload: dict, time_offset_ms: int) -> None:
+    """Convert absolute source-video timestamps into clip-local timestamps."""
+
+    for field_name in ("start", "end"):
+        value = payload.get(field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            payload[field_name] = value - time_offset_ms
 
 
 # ==========================================
@@ -216,6 +228,7 @@ def clip_video_and_transcript(
             transcript_data=transcript_data,
             start_index=clip_plan["start_index"],
             end_index=clip_plan["end_index"],
+            time_offset_ms=start_time_ms,
         )
         save_json(clip_transcript, output_transcript_path)
 
