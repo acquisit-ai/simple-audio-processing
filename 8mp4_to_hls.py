@@ -8,6 +8,26 @@ from typing import Callable
 
 
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".m4v", ".webm"}
+DEFAULT_VIDEO_BITRATE = "2500k"
+DEFAULT_MAXRATE = "3200k"
+DEFAULT_BUFSIZE = "5000k"
+DEFAULT_AUDIO_BITRATE = "128k"
+DEFAULT_GOP_SIZE = 48
+VIDEOTOOLBOX_ENCODER_ARGS = [
+    "-b:v", DEFAULT_VIDEO_BITRATE,
+    "-maxrate", DEFAULT_MAXRATE,
+    "-bufsize", DEFAULT_BUFSIZE,
+    "-g", str(DEFAULT_GOP_SIZE),
+    "-tag:v", "avc1",
+]
+LIBX264_ENCODER_ARGS = [
+    "-crf", "23",
+    "-preset", "veryfast",
+    "-maxrate", DEFAULT_MAXRATE,
+    "-bufsize", DEFAULT_BUFSIZE,
+    "-g", str(DEFAULT_GOP_SIZE),
+]
+HLS_AUDIO_TRANSCODE_ARGS = ["-b:a", DEFAULT_AUDIO_BITRATE]
 
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -32,18 +52,18 @@ def get_ffmpeg_encoders() -> str:
 
 def choose_video_encoder(use_gpu: bool = True) -> tuple[str, list[str]]:
     if not use_gpu:
-        return "libx264", ["-preset", "medium"]
+        return "libx264", LIBX264_ENCODER_ARGS
 
     system = platform.system().lower()
     encoders = get_ffmpeg_encoders()
 
     if system == "darwin" and "h264_videotoolbox" in encoders:
-        return "h264_videotoolbox", ["-tag:v", "avc1"]
+        return "h264_videotoolbox", VIDEOTOOLBOX_ENCODER_ARGS
 
     if "h264_nvenc" in encoders:
         return "h264_nvenc", ["-preset", "fast"]
 
-    return "libx264", ["-preset", "medium"]
+    return "libx264", LIBX264_ENCODER_ARGS
 
 
 def natural_sort_key(path: Path) -> list[object]:
@@ -82,7 +102,10 @@ def build_hls_ffmpeg_command(
     output_dir: Path,
     video_codec: str,
     encoder_opts: list[str],
+    audio_codec: str = "copy",
+    audio_opts: list[str] | None = None,
 ) -> list[str]:
+    resolved_audio_opts = audio_opts or []
     return [
         "ffmpeg",
         "-y",
@@ -93,11 +116,8 @@ def build_hls_ffmpeg_command(
         video_codec,
         *encoder_opts,
         "-c:a",
-        "aac",
-        "-b:v",
-        "3000k",
-        "-b:a",
-        "128k",
+        audio_codec,
+        *resolved_audio_opts,
         "-hls_time",
         "6",
         "-hls_playlist_type",
@@ -112,7 +132,12 @@ def build_hls_ffmpeg_command(
     ]
 
 
-def convert_video_to_hls(input_path: str, output_dir: str, use_gpu: bool = True) -> None:
+def convert_video_to_hls(
+    input_path: str,
+    output_dir: str,
+    use_gpu: bool = True,
+    force_transcode: bool = False,
+) -> None:
     ensure_ffmpeg_exists()
 
     input_file = Path(input_path)
@@ -123,20 +148,38 @@ def convert_video_to_hls(input_path: str, output_dir: str, use_gpu: bool = True)
 
     output_path.mkdir(parents=True, exist_ok=True)
 
-    video_codec, encoder_opts = choose_video_encoder(use_gpu=use_gpu)
-    cmd = build_hls_ffmpeg_command(input_file, output_path, video_codec, encoder_opts)
+    if force_transcode:
+        video_codec, encoder_opts = choose_video_encoder(use_gpu=use_gpu)
+        audio_codec = "aac"
+        audio_opts = HLS_AUDIO_TRANSCODE_ARGS
+    else:
+        video_codec = "copy"
+        encoder_opts = []
+        audio_codec = "copy"
+        audio_opts = []
+
+    cmd = build_hls_ffmpeg_command(
+        input_file,
+        output_path,
+        video_codec,
+        encoder_opts,
+        audio_codec=audio_codec,
+        audio_opts=audio_opts,
+    )
 
     try:
         run_cmd(cmd)
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr or ""
-        if use_gpu and video_codec != "libx264":
+        if force_transcode and use_gpu and video_codec != "libx264":
             fallback_codec, fallback_opts = choose_video_encoder(use_gpu=False)
             fallback_cmd = build_hls_ffmpeg_command(
                 input_file,
                 output_path,
                 fallback_codec,
                 fallback_opts,
+                audio_codec="aac",
+                audio_opts=HLS_AUDIO_TRANSCODE_ARGS,
             )
             try:
                 run_cmd(fallback_cmd)
@@ -157,7 +200,8 @@ def run_batch_convert(
     source_dir: Path,
     target_dir: Path,
     use_gpu: bool = True,
-    converter: Callable[[str, str, bool], None] = convert_video_to_hls,
+    force_transcode: bool = False,
+    converter: Callable[[str, str, bool, bool], None] = convert_video_to_hls,
 ) -> dict[str, int]:
     source_files = collect_supported_video_files(source_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -188,7 +232,7 @@ def run_batch_convert(
 
         try:
             print(f"[{index}/{len(source_files)}] 开始处理: {source_path.name}")
-            converter(str(source_path), str(output_dir), use_gpu)
+            converter(str(source_path), str(output_dir), use_gpu, force_transcode)
             processed += 1
             print(f"[{index}/{len(source_files)}] 处理完成: {source_path.name}")
         except Exception as exc:
@@ -236,7 +280,12 @@ def parse_args() -> argparse.Namespace:
         "--no-gpu",
         dest="use_gpu",
         action="store_false",
-        help="只使用 CPU 编码。",
+        help="强制转码时只使用 CPU 编码。",
+    )
+    parser.add_argument(
+        "--force-transcode",
+        action="store_true",
+        help="强制重新编码；默认只将已标准化的 H.264/AAC MP4 remux 为 fMP4 HLS。",
     )
     parser.set_defaults(use_gpu=True)
     return parser.parse_args()
@@ -244,5 +293,10 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    summary = run_batch_convert(args.source_dir, args.target_dir, use_gpu=args.use_gpu)
+    summary = run_batch_convert(
+        args.source_dir,
+        args.target_dir,
+        use_gpu=args.use_gpu,
+        force_transcode=args.force_transcode,
+    )
     raise SystemExit(1 if summary["failed"] > 0 else 0)

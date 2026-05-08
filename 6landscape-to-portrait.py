@@ -10,6 +10,46 @@ from typing import Callable
 
 
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".m4v", ".webm"}
+DEFAULT_OUTPUT_HEIGHT = 1280
+DEFAULT_VIDEO_BITRATE = "2500k"
+DEFAULT_MAXRATE = "3200k"
+DEFAULT_BUFSIZE = "5000k"
+DEFAULT_AUDIO_BITRATE = "128k"
+DEFAULT_GOP_SIZE = 48
+
+
+def build_videotoolbox_encoder_args(
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE,
+    maxrate: str = DEFAULT_MAXRATE,
+    bufsize: str = DEFAULT_BUFSIZE,
+    gop_size: int = DEFAULT_GOP_SIZE,
+) -> list[str]:
+    return [
+        "-b:v", video_bitrate,
+        "-maxrate", maxrate,
+        "-bufsize", bufsize,
+        "-g", str(gop_size),
+        "-tag:v", "avc1",
+    ]
+
+
+def build_libx264_encoder_args(
+    maxrate: str = DEFAULT_MAXRATE,
+    bufsize: str = DEFAULT_BUFSIZE,
+    gop_size: int = DEFAULT_GOP_SIZE,
+) -> list[str]:
+    return [
+        "-crf", "23",
+        "-preset", "veryfast",
+        "-maxrate", maxrate,
+        "-bufsize", bufsize,
+        "-g", str(gop_size),
+    ]
+
+
+VIDEOTOOLBOX_ENCODER_ARGS = build_videotoolbox_encoder_args()
+LIBX264_ENCODER_ARGS = build_libx264_encoder_args()
+AUDIO_ENCODER_ARGS = ["-c:a", "aac", "-b:a", DEFAULT_AUDIO_BITRATE]
 
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -62,20 +102,43 @@ def get_ffmpeg_encoders() -> str:
     return result.stdout + result.stderr
 
 
-def choose_video_encoder() -> tuple[str, list[str]]:
+def choose_video_encoder(
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE,
+    maxrate: str = DEFAULT_MAXRATE,
+    bufsize: str = DEFAULT_BUFSIZE,
+    gop_size: int = DEFAULT_GOP_SIZE,
+) -> tuple[str, list[str]]:
     system = platform.system().lower()
     encoders = get_ffmpeg_encoders()
 
     # macOS: VideoToolbox
     if system == "darwin" and "h264_videotoolbox" in encoders:
-        return "h264_videotoolbox", ["-b:v", "8M"]
+        return "h264_videotoolbox", build_videotoolbox_encoder_args(
+            video_bitrate=video_bitrate,
+            maxrate=maxrate,
+            bufsize=bufsize,
+            gop_size=gop_size,
+        )
 
     # Windows: NVIDIA NVENC if available
     if system == "windows" and "h264_nvenc" in encoders:
         return "h264_nvenc", ["-cq", "23", "-preset", "p5"]
 
     # fallback
-    return "libx264", ["-crf", "20", "-preset", "medium"]
+    return "libx264", build_libx264_encoder_args(
+        maxrate=maxrate,
+        bufsize=bufsize,
+        gop_size=gop_size,
+    )
+
+
+def build_output_size(
+    source_width: int,
+    source_height: int,
+    output_height: int = DEFAULT_OUTPUT_HEIGHT,
+) -> tuple[int, int]:
+    output_width = make_even(math.ceil(output_height * 9 / 16))
+    return output_width, make_even(output_height)
 
 
 def build_filter(output_w: int, output_h: int, blur_sigma: int = 35) -> str:
@@ -123,7 +186,16 @@ def collect_existing_video_names(directory: Path) -> set[str]:
     return {path.name for path in collect_supported_video_files(directory)}
 
 
-def convert_landscape_to_vertical(input_path: str, output_path: str) -> None:
+def convert_landscape_to_vertical(
+    input_path: str,
+    output_path: str,
+    output_height: int = DEFAULT_OUTPUT_HEIGHT,
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE,
+    maxrate: str = DEFAULT_MAXRATE,
+    bufsize: str = DEFAULT_BUFSIZE,
+    audio_bitrate: str = DEFAULT_AUDIO_BITRATE,
+    gop_size: int = DEFAULT_GOP_SIZE,
+) -> None:
     ensure_ffmpeg_exists()
 
     input_file = Path(input_path)
@@ -140,15 +212,16 @@ def convert_landscape_to_vertical(input_path: str, output_path: str) -> None:
             "This function only handles landscape videos."
         )
 
-    if src_w > 1080:
-        out_w = 1080
-        out_h = 1920
-    else:
-        out_w = make_even(src_w)
-        out_h = make_even(math.ceil(src_w / 9 * 16))
+    out_w, out_h = build_output_size(src_w, src_h, output_height=output_height)
 
-    encoder, encoder_args = choose_video_encoder()
+    encoder, encoder_args = choose_video_encoder(
+        video_bitrate=video_bitrate,
+        maxrate=maxrate,
+        bufsize=bufsize,
+        gop_size=gop_size,
+    )
     filter_complex = build_filter(out_w, out_h)
+    audio_encoder_args = ["-c:a", "aac", "-b:a", audio_bitrate]
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -167,10 +240,7 @@ def convert_landscape_to_vertical(input_path: str, output_path: str) -> None:
         "-c:v",
         encoder,
         *encoder_args,
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
+        *audio_encoder_args,
         "-movflags",
         "+faststart",
         str(output_file),
@@ -196,14 +266,12 @@ def convert_landscape_to_vertical(input_path: str, output_path: str) -> None:
                 "0:a?",
                 "-c:v",
                 "libx264",
-                "-crf",
-                "20",
-                "-preset",
-                "medium",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
+                *build_libx264_encoder_args(
+                    maxrate=maxrate,
+                    bufsize=bufsize,
+                    gop_size=gop_size,
+                ),
+                *audio_encoder_args,
                 "-movflags",
                 "+faststart",
                 str(output_file),
@@ -216,7 +284,13 @@ def convert_landscape_to_vertical(input_path: str, output_path: str) -> None:
 def run_batch_convert(
     source_dir: Path,
     target_dir: Path,
-    converter: Callable[[str, str], None] = convert_landscape_to_vertical,
+    output_height: int = DEFAULT_OUTPUT_HEIGHT,
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE,
+    maxrate: str = DEFAULT_MAXRATE,
+    bufsize: str = DEFAULT_BUFSIZE,
+    audio_bitrate: str = DEFAULT_AUDIO_BITRATE,
+    gop_size: int = DEFAULT_GOP_SIZE,
+    converter: Callable[[str, str, int, str, str, str, str, int], None] = convert_landscape_to_vertical,
 ) -> dict[str, int]:
     source_files = collect_supported_video_files(source_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -249,7 +323,16 @@ def run_batch_convert(
 
         try:
             print(f"[{index}/{len(source_files)}] 开始处理: {source_path.name}")
-            converter(str(source_path), str(target_path))
+            converter(
+                str(source_path),
+                str(target_path),
+                output_height,
+                video_bitrate,
+                maxrate,
+                bufsize,
+                audio_bitrate,
+                gop_size,
+            )
             existing_names.add(source_path.name)
             processed += 1
             print(f"[{index}/{len(source_files)}] 处理完成: {source_path.name}")
@@ -284,10 +367,25 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="目标目录；若已存在同名视频则跳过。",
     )
+    parser.add_argument("--height", type=int, default=DEFAULT_OUTPUT_HEIGHT, help="输出竖屏高度，默认 1280。")
+    parser.add_argument("--video-bitrate", default=DEFAULT_VIDEO_BITRATE, help="VideoToolbox 目标视频码率，默认 2500k。")
+    parser.add_argument("--maxrate", default=DEFAULT_MAXRATE, help="视频码率上限，默认 3200k。")
+    parser.add_argument("--bufsize", default=DEFAULT_BUFSIZE, help="码率控制 buffer size，默认 5000k。")
+    parser.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC 音频码率，默认 128k。")
+    parser.add_argument("--gop-size", type=int, default=DEFAULT_GOP_SIZE, help="关键帧间隔，默认 48。")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    summary = run_batch_convert(args.source_dir, args.target_dir)
+    summary = run_batch_convert(
+        args.source_dir,
+        args.target_dir,
+        output_height=args.height,
+        video_bitrate=args.video_bitrate,
+        maxrate=args.maxrate,
+        bufsize=args.bufsize,
+        audio_bitrate=args.audio_bitrate,
+        gop_size=args.gop_size,
+    )
     raise SystemExit(1 if summary["failed"] > 0 else 0)
