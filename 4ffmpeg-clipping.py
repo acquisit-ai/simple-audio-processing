@@ -39,6 +39,19 @@ def ms_to_ffmpeg_seconds(milliseconds: int) -> str:
     return f"{milliseconds / 1000:.3f}"
 
 
+def is_valid_existing_clip(video_path: Path, transcript_path: Path) -> bool:
+    if not video_path.exists() or video_path.stat().st_size == 0:
+        return False
+    if not transcript_path.exists() or transcript_path.stat().st_size == 0:
+        return False
+
+    try:
+        load_json(transcript_path)
+    except Exception:
+        return False
+    return True
+
+
 # ==========================================
 # 2. transcript 切片工具
 #    - 按切片方案中的 start_index / end_index 提取句子
@@ -117,8 +130,9 @@ def rebase_timing_fields(payload: dict, time_offset_ms: int) -> None:
 # 3. 视频切片工具
 #    - 默认优先使用 buffered_start_time / buffered_end_time
 #    - 若不存在，则退回 start_time / end_time
-#    - 使用 ffmpeg 直切并复制原始码流，不做转码
-#    - 切点会受关键帧影响，但当前有 buffer，可接受这类误差
+#    - 输出 MP4，重编码主视频和主音频，避免 stream copy 回退到关键帧
+#    - 优先使用 macOS VideoToolbox H.264，失败时回退到 libx264
+#    - 质量目标接近常见短视频平台
 # ==========================================
 def resolve_clip_times(clip_plan: dict) -> tuple[int, int]:
     start_time = clip_plan.get("buffered_start_time", clip_plan["start_time"])
@@ -144,7 +158,7 @@ def cut_video_clip(
     output_video_path.parent.mkdir(parents=True, exist_ok=True)
     duration_ms = end_time_ms - start_time_ms
 
-    command = [
+    common_input_args = [
         ffmpeg_path,
         "-y",
         "-ss",
@@ -154,18 +168,89 @@ def cut_video_clip(
         "-t",
         ms_to_ffmpeg_seconds(duration_ms),
         "-map",
-        "0",
-        "-c",
-        "copy",
-        "-avoid_negative_ts",
-        "1",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-sn",
+        "-dn",
+        "-map_chapters",
+        "-1",
+    ]
+    common_output_args = [
+        "-g",
+        "48",
+        "-pix_fmt",
+        "yuv420p",
+        "-tag:v",
+        "avc1",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-movflags",
+        "+faststart",
         str(output_video_path),
     ]
+    videotoolbox_command = [
+        *common_input_args,
+        "-c:v",
+        "h264_videotoolbox",
+        "-b:v",
+        "6500k",
+        "-maxrate",
+        "8000k",
+        "-bufsize",
+        "12000k",
+        *common_output_args,
+    ]
+    libx264_command = [
+        *common_input_args,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-maxrate",
+        "8000k",
+        "-bufsize",
+        "12000k",
+        *common_output_args,
+    ]
 
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(videotoolbox_command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        error_message = result.stderr.strip() or result.stdout.strip() or "未知错误"
+        first_error_message = summarize_ffmpeg_error(result.stderr, result.stdout)
+        print(
+            "⚠️  VideoToolbox 编码失败，改用 libx264 CPU 编码。"
+            f" 原因: {first_error_message}"
+        )
+        result = subprocess.run(libx264_command, capture_output=True, text=True, check=False)
+
+    if result.returncode != 0:
+        error_message = summarize_ffmpeg_error(result.stderr, result.stdout)
         raise RuntimeError(f"ffmpeg 切片失败: {error_message}")
+
+
+def summarize_ffmpeg_error(stderr: str, stdout: str) -> str:
+    output = stderr.strip() or stdout.strip()
+    if not output:
+        return "未知错误"
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    important_markers = (
+        "Cannot create compression session",
+        "Error while opening encoder",
+        "Conversion failed",
+        "Unknown encoder",
+        "Invalid argument",
+    )
+    important_lines = [
+        line for line in lines
+        if any(marker in line for marker in important_markers)
+    ]
+    summary_lines = important_lines or lines[-3:]
+    return " | ".join(summary_lines)
 
 
 # ==========================================
@@ -179,6 +264,7 @@ def clip_video_and_transcript(
     video_path: str,
     transcript_path: str,
     output_dir: str,
+    skip_existing: bool = False,
 ) -> None:
     clipping_plan_file = Path(clipping_plan_path)
     source_video_file = Path(video_path)
@@ -198,7 +284,6 @@ def clip_video_and_transcript(
 
     output_directory.mkdir(parents=True, exist_ok=True)
     base_name = source_video_file.stem
-    video_suffix = source_video_file.suffix
 
     print(f"开始处理视频切片: {source_video_file}")
     print(f"切片数量: {len(clips)}")
@@ -206,7 +291,7 @@ def clip_video_and_transcript(
 
     for clip_number, clip_plan in enumerate(clips, start=1):
         clip_name = f"{base_name}-clip{clip_number}"
-        output_video_path = output_directory / f"{clip_name}{video_suffix}"
+        output_video_path = output_directory / f"{clip_name}.mp4"
         output_transcript_path = output_directory / f"{clip_name}.json"
 
         start_time_ms, end_time_ms = resolve_clip_times(clip_plan)
@@ -215,6 +300,10 @@ def clip_video_and_transcript(
             f"视频时间 {start_time_ms}-{end_time_ms} ms | "
             f"句子 {clip_plan['start_index']}-{clip_plan['end_index']}"
         )
+
+        if skip_existing and is_valid_existing_clip(output_video_path, output_transcript_path):
+            print(f"[{clip_number}/{len(clips)}] 跳过已存在: {clip_name}")
+            continue
 
         cut_video_clip(
             ffmpeg_path=ffmpeg_path,
@@ -245,6 +334,7 @@ if __name__ == "__main__":
     parser.add_argument("video_path", help="需要切片的视频路径")
     parser.add_argument("transcript_path", help="原始 transcript JSON 文件路径，例如 2cleaned-data/xxx.json")
     parser.add_argument("output_dir", help="输出文件夹")
+    parser.add_argument("--skip-existing", action="store_true", help="跳过已存在且可读取的 clip mp4/json")
     args = parser.parse_args()
 
     clip_video_and_transcript(
@@ -252,4 +342,5 @@ if __name__ == "__main__":
         video_path=args.video_path,
         transcript_path=args.transcript_path,
         output_dir=args.output_dir,
+        skip_existing=args.skip_existing,
     )
