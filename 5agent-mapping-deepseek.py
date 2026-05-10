@@ -34,10 +34,10 @@ from typing import Any, Literal
 
 from dotenv import dotenv_values
 from openai import OpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 
-DEFAULT_BATCH_SIZE = 4
+DEFAULT_BATCH_SIZE = 3
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_STAGE_ONE_MODEL = "deepseek-v4-pro"
 DEFAULT_STAGE_ONE_REASONING_EFFORT = "max"
@@ -104,7 +104,7 @@ STAGE_ONE_PROMPT = """
 请将英文文本进行结构化分析，并严格按输入 token 顺序完成语言分片与解释生成。
 你必须遵守以下规则：
 
-1. 对输入批次中的每个句子都输出一个整句中文翻译 explanation。
+1. 对输入批次中的每个句子都输出一个整句中文翻译 translation。
 2. 以输入 tokens 为唯一基础单位合并为有意义的语言元素分片; 只能将相邻 tokens 合并，不能改写文本。
 3. 输出必须完整覆盖所有输入 tokens, 输出 token 之间不得重叠、不得跳词、不得打乱顺序。
 4. 合并目标以英语学习为导向：
@@ -121,7 +121,7 @@ STAGE_ONE_PROMPT = """
 JSON 输出协议：
 - 只输出一个合法 JSON object，不要输出 Markdown，不要用 ```json 代码块包裹。
 - 顶层必须只有 `sentences` 字段。
-- 每个 sentence 必须包含 `index`、`text`、`explanation`、`tokens`。
+- 每个 sentence 必须包含 `index`、`text`、`translation`、`tokens`。
 - 每个 token 必须包含 `text`、`explanation`、`semantic_element`。
 - 每个 semantic_element 必须包含 `base_form`、`translation`、`dictionary`。
 - 不要使用未要求字段。
@@ -132,7 +132,7 @@ EXAMPLE JSON OUTPUT:
     {
       "index": 0,
       "text": "I wanted to help.",
-      "explanation": "我当时想帮忙。",
+      "translation": "我当时想帮忙。",
       "tokens": [
         {
           "text": "I",
@@ -144,8 +144,8 @@ EXAMPLE JSON OUTPUT:
           }
         },
         {
-          "text": "wanted",
-          "explanation": "在这里表示过去想要做某事；wanted 是 want 的过去式。",
+          "text": "wanted to",
+          "explanation": "在这里表示过去想要做某事；wanted 是 want 的过去式，to 引出后面的动作。",
           "semantic_element": {
             "base_form": "want",
             "translation": "想要",
@@ -153,8 +153,8 @@ EXAMPLE JSON OUTPUT:
           }
         },
         {
-          "text": "to help",
-          "explanation": "不定式结构，说明 wanted 的具体内容是去帮忙。",
+          "text": "help",
+          "explanation": "说明 wanted to 的具体动作是帮忙。",
           "semantic_element": {
             "base_form": "help",
             "translation": "帮忙",
@@ -322,9 +322,11 @@ class StageOneToken(BaseModel):
 class StageOneSentence(BaseModel):
     """第一阶段返回的一条句子结果。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     index: int
     text: str
-    explanation: str
+    translation: str
     tokens: list[StageOneToken]
 
 
@@ -727,7 +729,7 @@ def validate_and_index_batch(
         validated_sentence = {
             "index": output_sentence["index"],
             "text": output_sentence["text"],
-            "explanation": output_sentence["explanation"],
+            "translation": output_sentence["translation"],
             "tokens": validated_tokens,
         }
         validated_sentences.append(validated_sentence)

@@ -35,7 +35,7 @@ from typing import Any, Literal
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 DEFAULT_BATCH_SIZE = 3
@@ -104,7 +104,7 @@ STAGE_ONE_PROMPT = """
 请将英文文本进行结构化分析，并严格按输入 token 顺序完成语言分片与解释生成。
 你必须遵守以下规则：
 
-1. 对输入批次中的每个句子都输出一个整句中文翻译 explanation。
+1. 对输入批次中的每个句子都输出一个整句中文翻译 translation。
 2. 以输入 tokens 为唯一基础单位合并为有意义的语言元素分片; 只能将相邻 tokens 合并，不能改写文本。
 3. 输出必须完整覆盖所有输入 tokens, 输出 token 之间不得重叠、不得跳词、不得打乱顺序。
 4. 合并目标以英语学习为导向：
@@ -246,9 +246,11 @@ class StageOneToken(BaseModel):
 class StageOneSentence(BaseModel):
     """第一阶段返回的一条句子结果。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     index: int
     text: str
-    explanation: str
+    translation: str
     tokens: list[StageOneToken]
 
 
@@ -610,7 +612,7 @@ def validate_and_index_batch(
         validated_sentence = {
             "index": output_sentence["index"],
             "text": output_sentence["text"],
-            "explanation": output_sentence["explanation"],
+            "translation": output_sentence["translation"],
             "tokens": validated_tokens,
         }
         validated_sentences.append(validated_sentence)
