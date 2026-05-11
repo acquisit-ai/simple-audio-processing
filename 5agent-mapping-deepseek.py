@@ -37,11 +37,11 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 
-DEFAULT_BATCH_SIZE = 3
+DEFAULT_BATCH_SIZE = 4
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_STAGE_ONE_MODEL = "deepseek-v4-pro"
 DEFAULT_STAGE_ONE_REASONING_EFFORT = "max"
-DEFAULT_STAGE_THREE_MODEL = "deepseek-v4-pro"
+DEFAULT_STAGE_THREE_MODEL = "deepseek-v4-flash"
 DEFAULT_STAGE_THREE_REASONING_EFFORT = "high"
 ROOT_DIR = Path(__file__).resolve().parent
 QUERY_SCRIPT_PATH = ROOT_DIR / "supabase" / "query_coarse_units.py"
