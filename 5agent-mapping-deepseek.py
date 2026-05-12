@@ -66,9 +66,23 @@ DIRECT_NO_MATCH_BASEFORMS = {
     "of", "to", "in", "on", "at", "for", "with", "from", "by",
     "up", "down", "out", "off",
     "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves",
+    "please",
+    "sorry",
+    "thanks", "thank", "thank you",
+    "bye", "goodbye",
+    "hello", "hi",
+    "nah", "nope",
+    "ha", "haha", "hahaha",
+    "yeah", "yep", "yup",
+    "ok", "okay", "alright", "all right",
+    "oh", "ooh", "ah", "uh", "um", "uhh", "umm", "hm", "hmm", "huh", "uh-huh",
+    "wow", "whoa", "oops",
+    "mm", "mmm", "mhm", "mm-hmm",
+    "er", "erm",
+    "hey",
 }
 DIRECT_NO_MATCH_REASON = (
-    "当前 token 属于过于简单、极高频、低学习价值的基础功能词或代词，"
+    "当前 token 属于过于简单、极高频、低学习价值的基础功能词、代词或口语填充词，"
     "不进入 coarse_unit 映射，直接按 no_match 处理。"
 )
 

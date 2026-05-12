@@ -27,6 +27,10 @@ DEFAULT_MAX_QUESTIONS = 20
 DEFAULT_BATCH_SIZE = 10
 DEFAULT_QUESTION_TYPES = "context_meaning_choice,context_cloze_choice"
 DEFAULT_MODEL = "deepseek-v4-pro"
+DEFAULT_SELECTION_MODEL = "deepseek-v4-flash"
+DEFAULT_SELECTION_TOP_K = 5
+DEFAULT_SELECTION_BATCH_SIZE = 10
+DEFAULT_SELECTION_MAX_WORKERS = 4
 ROOT_DIR = Path(__file__).resolve().parent
 QUESTION_SCRIPT = ROOT_DIR / "9question-generation-deepseek.py"
 
@@ -44,11 +48,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_TARGET_DIR,
         help="Directory to store generated question JSON files.",
-    )
-    parser.add_argument(
-        "--video-id",
-        required=True,
-        help="catalog.videos.video_id passed to every generated video_unit question.",
     )
     parser.add_argument(
         "--max-workers",
@@ -83,6 +82,29 @@ def parse_args() -> argparse.Namespace:
         "--model",
         default=DEFAULT_MODEL,
         help="DeepSeek model passed to the single-file generator.",
+    )
+    parser.add_argument(
+        "--selection-model",
+        default=DEFAULT_SELECTION_MODEL,
+        help="DeepSeek context-selection model passed to the single-file generator.",
+    )
+    parser.add_argument(
+        "--selection-top-k",
+        type=int,
+        default=DEFAULT_SELECTION_TOP_K,
+        help="Top sentence candidates per coarse unit passed to the single-file generator.",
+    )
+    parser.add_argument(
+        "--selection-batch-size",
+        type=int,
+        default=DEFAULT_SELECTION_BATCH_SIZE,
+        help="Context selection groups per AI call passed to the single-file generator.",
+    )
+    parser.add_argument(
+        "--selection-max-workers",
+        type=int,
+        default=DEFAULT_SELECTION_MAX_WORKERS,
+        help="Maximum concurrent context-selection AI calls passed to the single-file generator.",
     )
     return parser.parse_args()
 
@@ -123,12 +145,15 @@ def build_pending_jobs(source_files: list[Path], target_dir: Path) -> tuple[list
 def run_single_file(
     source_path: Path,
     target_path: Path,
-    video_id: str,
     max_questions: int,
     question_types: str,
     batch_size: int,
     env_path: Path,
     model: str,
+    selection_model: str,
+    selection_top_k: int,
+    selection_batch_size: int,
+    selection_max_workers: int,
 ) -> tuple[bool, str]:
     """
     调用 9question-generation-deepseek.py 处理单个 mapped JSON。
@@ -143,8 +168,6 @@ def run_single_file(
         str(QUESTION_SCRIPT),
         str(source_path),
         str(target_path),
-        "--video-id",
-        video_id,
         "--max-questions",
         str(max_questions),
         "--question-types",
@@ -155,6 +178,14 @@ def run_single_file(
         str(env_path),
         "--model",
         model,
+        "--selection-model",
+        selection_model,
+        "--selection-top-k",
+        str(selection_top_k),
+        "--selection-batch-size",
+        str(selection_batch_size),
+        "--selection-max-workers",
+        str(selection_max_workers),
     ]
 
     try:
@@ -181,6 +212,12 @@ def main() -> None:
         raise SystemExit("--max-questions must be at least 1")
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be at least 1")
+    if args.selection_top_k < 1:
+        raise SystemExit("--selection-top-k must be at least 1")
+    if args.selection_batch_size < 1:
+        raise SystemExit("--selection-batch-size must be at least 1")
+    if args.selection_max_workers < 1:
+        raise SystemExit("--selection-max-workers must be at least 1")
 
     if not QUESTION_SCRIPT.exists():
         raise FileNotFoundError(f"Question generation script not found: {QUESTION_SCRIPT}")
@@ -197,12 +234,15 @@ def main() -> None:
     print("=== 题目生成批处理启动 ===", flush=True)
     print(f"源目录：{source_dir}", flush=True)
     print(f"目标目录：{target_dir}", flush=True)
-    print(f"video_id：{args.video_id}", flush=True)
     print(f"并发数：{args.max_workers}", flush=True)
     print(f"每文件题目上限：{args.max_questions}", flush=True)
     print(f"题型：{args.question_types}", flush=True)
     print(f"候选 batch size：{args.batch_size}", flush=True)
     print(f"模型：{args.model}", flush=True)
+    print(f"选句模型：{args.selection_model}", flush=True)
+    print(f"选句 top K：{args.selection_top_k}", flush=True)
+    print(f"选句 batch size：{args.selection_batch_size}", flush=True)
+    print(f"选句并发数：{args.selection_max_workers}", flush=True)
     print(f"源文件总数：{len(source_files)}", flush=True)
 
     pending_jobs, skipped = build_pending_jobs(source_files, target_dir)
@@ -224,12 +264,15 @@ def main() -> None:
                 run_single_file,
                 source_path,
                 target_path,
-                args.video_id,
                 args.max_questions,
                 args.question_types,
                 args.batch_size,
                 args.env_path,
                 args.model,
+                args.selection_model,
+                args.selection_top_k,
+                args.selection_batch_size,
+                args.selection_max_workers,
             ): (source_path, target_path)
             for source_path, target_path in pending_jobs
         }

@@ -75,12 +75,15 @@ def test_run_single_file_invokes_question_generation_script(monkeypatch, tmp_pat
     success, detail = batch.run_single_file(
         source_path=source,
         target_path=target,
-        video_id="00000000-0000-0000-0000-000000000001",
         max_questions=12,
         question_types="context_meaning_choice,context_cloze_choice",
         batch_size=4,
         env_path=tmp_path / ".env",
         model="deepseek-v4-pro",
+        selection_model="deepseek-v4-flash",
+        selection_top_k=5,
+        selection_batch_size=10,
+        selection_max_workers=4,
     )
 
     assert success is True
@@ -92,8 +95,6 @@ def test_run_single_file_invokes_question_generation_script(monkeypatch, tmp_pat
                 str(batch.QUESTION_SCRIPT),
                 str(source),
                 str(target),
-                "--video-id",
-                "00000000-0000-0000-0000-000000000001",
                 "--max-questions",
                 "12",
                 "--question-types",
@@ -104,6 +105,14 @@ def test_run_single_file_invokes_question_generation_script(monkeypatch, tmp_pat
                 str(tmp_path / ".env"),
                 "--model",
                 "deepseek-v4-pro",
+                "--selection-model",
+                "deepseek-v4-flash",
+                "--selection-top-k",
+                "5",
+                "--selection-batch-size",
+                "10",
+                "--selection-max-workers",
+                "4",
             ],
             "cwd": batch.ROOT_DIR,
             "stdout": subprocess.DEVNULL,
@@ -127,12 +136,15 @@ def test_run_single_file_reports_nonzero_exit(monkeypatch, tmp_path: Path):
     success, detail = batch.run_single_file(
         source_path=tmp_path / "mapped.json",
         target_path=tmp_path / "questions.json",
-        video_id="00000000-0000-0000-0000-000000000001",
         max_questions=20,
         question_types="context_meaning_choice",
         batch_size=10,
         env_path=tmp_path / ".env",
         model="deepseek-v4-pro",
+        selection_model="deepseek-v4-flash",
+        selection_top_k=5,
+        selection_batch_size=10,
+        selection_max_workers=4,
     )
 
     assert success is False
