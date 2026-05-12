@@ -121,7 +121,6 @@ def select_first_sentence_candidates(question_gen, payload=None):
     groups = question_gen.build_context_selection_groups(
         occurrences,
         top_k=question_gen.DEFAULT_SELECTION_TOP_K,
-        max_groups=10,
     )
     selection_output = question_gen.AIContextSelectionBatchOutput.model_validate(
         {
@@ -238,16 +237,16 @@ def test_hard_filter_allows_multiple_distinct_coarse_units_in_one_sentence():
     assert "sentence candidate limit reached" not in {reject.reason for reject in rejects}
 
 
-def test_context_selection_groups_limit_max_groups_without_rejecting_remaining_occurrences():
+def test_context_selection_groups_include_all_unique_coarse_units():
     question_gen = load_module()
 
     occurrences, rejects = question_gen.extract_question_occurrences(
         mapped_payload(),
         allowed_question_types=["context_meaning_choice"],
     )
-    groups = question_gen.build_context_selection_groups(occurrences, top_k=5, max_groups=1)
+    groups = question_gen.build_context_selection_groups(occurrences, top_k=5)
 
-    assert len(groups) == 1
+    assert {group.coarse_unit_id for group in groups} == {130328, 138446}
     assert "max candidate limit reached" not in {reject.reason for reject in rejects}
 
 
@@ -272,7 +271,7 @@ def test_context_selection_groups_merge_same_coarse_sentence_and_keep_top_k():
         payload,
         allowed_question_types=["context_meaning_choice"],
     )
-    groups = question_gen.build_context_selection_groups(occurrences, top_k=1, max_groups=10)
+    groups = question_gen.build_context_selection_groups(occurrences, top_k=1)
     sacred_group = next(group for group in groups if group.coarse_unit_id == 138446)
 
     assert len(sacred_group.sentence_candidates) == 1
@@ -454,7 +453,7 @@ def test_context_selection_prompt_has_concrete_selection_criteria():
         mapped_payload(),
         allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
     )
-    groups = question_gen.build_context_selection_groups(occurrences, top_k=5, max_groups=10)
+    groups = question_gen.build_context_selection_groups(occurrences, top_k=5)
 
     messages = question_gen.build_context_selection_messages(groups, "full transcript")
     prompt = messages[0]["content"]
@@ -766,7 +765,6 @@ def test_validate_context_selection_requires_one_selection_per_group():
             allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
         )[0],
         top_k=5,
-        max_groups=10,
     )
     valid_output = question_gen.AIContextSelectionBatchOutput.model_validate(
         {
@@ -837,7 +835,7 @@ def test_parse_llm_context_selection_response_rejects_wrong_ids():
         mapped_payload(),
         allowed_question_types=["context_meaning_choice"],
     )
-    groups = question_gen.build_context_selection_groups(occurrences, top_k=5, max_groups=10)
+    groups = question_gen.build_context_selection_groups(occurrences, top_k=5)
     with pytest.raises(ValueError, match="unknown group_id"):
         question_gen.apply_context_selections(groups, output)
 
@@ -1134,7 +1132,6 @@ def test_run_generation_with_fake_llm_writes_wrapper_audit_and_progress(capsys, 
         mapped_json=mapped_path,
         output_json=output_path,
         allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
-        max_questions=1,
         batch_size=10,
         llm=FakeLLM(),
         model_name="fake-deepseek",
@@ -1184,7 +1181,6 @@ def test_run_generation_writes_candidate_checkpoint_before_question_batches(tmp_
             mapped_json=mapped_path,
             output_json=output_path,
             allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
-            max_questions=2,
             batch_size=10,
             llm=FailingQuestionLLM(),
             model_name="fake-deepseek",
@@ -1214,7 +1210,6 @@ def test_run_generation_resumes_candidate_checkpoint_without_selection_llm(tmp_p
             mapped_json=mapped_path,
             output_json=output_path,
             allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
-            max_questions=2,
             batch_size=10,
             llm=FailingQuestionLLM(),
             model_name="fake-deepseek",
@@ -1256,7 +1251,6 @@ def test_run_generation_resumes_candidate_checkpoint_without_selection_llm(tmp_p
         mapped_json=mapped_path,
         output_json=output_path,
         allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
-        max_questions=2,
         batch_size=10,
         llm=FakeQuestionLLM(),
         model_name="fake-deepseek",
@@ -1327,7 +1321,6 @@ def test_run_generation_resumes_from_temp_and_skips_processed_candidates(tmp_pat
         mapped_json=mapped_path,
         output_json=output_path,
         allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
-        max_questions=2,
         batch_size=10,
         llm=FailingLLM(),
         model_name="fake-deepseek",
@@ -1417,7 +1410,6 @@ def test_run_generation_resumes_from_temp_and_continues_unprocessed_candidates(t
         mapped_json=mapped_path,
         output_json=output_path,
         allowed_question_types=["context_meaning_choice", "context_cloze_choice"],
-        max_questions=2,
         batch_size=10,
         llm=FakeLLM(),
         model_name="fake-deepseek",

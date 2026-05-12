@@ -75,7 +75,6 @@ def test_run_single_file_invokes_question_generation_script(monkeypatch, tmp_pat
     success, detail = batch.run_single_file(
         source_path=source,
         target_path=target,
-        max_questions=12,
         question_types="context_meaning_choice,context_cloze_choice",
         batch_size=4,
         env_path=tmp_path / ".env",
@@ -95,8 +94,6 @@ def test_run_single_file_invokes_question_generation_script(monkeypatch, tmp_pat
                 str(batch.QUESTION_SCRIPT),
                 str(source),
                 str(target),
-                "--max-questions",
-                "12",
                 "--question-types",
                 "context_meaning_choice,context_cloze_choice",
                 "--batch-size",
@@ -136,7 +133,6 @@ def test_run_single_file_reports_nonzero_exit(monkeypatch, tmp_path: Path):
     success, detail = batch.run_single_file(
         source_path=tmp_path / "mapped.json",
         target_path=tmp_path / "questions.json",
-        max_questions=20,
         question_types="context_meaning_choice",
         batch_size=10,
         env_path=tmp_path / ".env",

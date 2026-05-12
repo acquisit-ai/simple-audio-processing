@@ -36,12 +36,11 @@ DEFAULT_QUESTION_THINKING = {"type": "enabled"}
 DEFAULT_SELECTION_MODEL = "deepseek-v4-flash"
 DEFAULT_SELECTION_REASONING_EFFORT = "high"
 DEFAULT_SELECTION_THINKING = {"type": "enabled"}
-DEFAULT_SELECTION_TOP_K = 5
-DEFAULT_SELECTION_BATCH_SIZE = 10
+DEFAULT_SELECTION_TOP_K = 6
+DEFAULT_SELECTION_BATCH_SIZE = 15
 DEFAULT_SELECTION_MAX_WORKERS = 4
 CHECKPOINT_VERSION = 1
-DEFAULT_BATCH_SIZE = 10
-DEFAULT_MAX_QUESTIONS = 20
+DEFAULT_BATCH_SIZE = 15
 DEFAULT_TOOL_CALL_PARSE_MAX_ATTEMPTS = 3
 SUPPORTED_QUESTION_TYPES = {"context_meaning_choice", "context_cloze_choice"}
 EXPECTED_OPTION_IDS = ["correct", "wrong_1", "wrong_2", "wrong_3"]
@@ -742,7 +741,6 @@ def extract_question_occurrences(
 def build_context_selection_groups(
     occurrences: list[QuestionOccurrence],
     top_k: int,
-    max_groups: int,
 ) -> list[ContextSelectionGroup]:
     sentence_candidates_by_key: dict[tuple[int, int], QuestionOccurrence] = {}
     for occurrence in occurrences:
@@ -778,7 +776,7 @@ def build_context_selection_groups(
 
     groups: list[ContextSelectionGroup] = []
     sentence_candidate_counter = 0
-    for group_index, (best_occurrence, group_occurrences) in enumerate(group_items[:max_groups], start=1):
+    for group_index, (best_occurrence, group_occurrences) in enumerate(group_items, start=1):
         sentence_candidates: list[SentenceCandidate] = []
         for occurrence in group_occurrences:
             sentence_candidate_counter += 1
@@ -853,7 +851,6 @@ def apply_context_selections(
 def extract_question_candidates(
     mapped_payload: dict[str, Any],
     allowed_question_types: list[str],
-    max_candidates: int,
 ) -> tuple[list[QuestionCandidate], list[CandidateReject]]:
     occurrences, rejects = extract_question_occurrences(
         mapped_payload,
@@ -862,7 +859,6 @@ def extract_question_candidates(
     groups = build_context_selection_groups(
         occurrences,
         top_k=1,
-        max_groups=max_candidates,
     )
     selection_output = AIContextSelectionBatchOutput.model_validate(
         {
@@ -1336,7 +1332,6 @@ def write_selection_events(
 def select_question_candidates(
     mapped_payload: dict[str, Any],
     allowed_question_types: list[str],
-    max_candidates: int,
     selection_top_k: int,
     selection_batch_size: int,
     selection_max_workers: int,
@@ -1353,7 +1348,6 @@ def select_question_candidates(
     groups = build_context_selection_groups(
         occurrences,
         top_k=selection_top_k,
-        max_groups=max_candidates,
     )
     auto_selected_group_ids = {
         group.group_id for group in groups if len(group.sentence_candidates) == 1
@@ -1398,7 +1392,6 @@ def run_generation(
     mapped_json: Path,
     output_json: Path,
     allowed_question_types: list[str],
-    max_questions: int,
     batch_size: int,
     llm: Any,
     model_name: str,
@@ -1410,8 +1403,6 @@ def run_generation(
 ) -> FinalOutput:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
-    if max_questions < 1:
-        raise ValueError("max_questions must be at least 1")
     if selection_top_k < 1:
         raise ValueError("selection_top_k must be at least 1")
     if selection_batch_size < 1:
@@ -1435,16 +1426,11 @@ def run_generation(
             selection_top_k=selection_top_k,
         )
     )
-    if len(existing_questions) > max_questions:
-        raise ValueError("existing question count exceeds max_questions")
-
-    candidate_pool_limit = max(max_questions * 4, batch_size)
     hard_rejects: list[CandidateReject] = []
     if candidate_checkpoint is None:
         candidates, hard_rejects = select_question_candidates(
             mapped_payload=mapped_payload,
             allowed_question_types=allowed_question_types,
-            max_candidates=candidate_pool_limit,
             selection_top_k=selection_top_k,
             selection_batch_size=selection_batch_size,
             selection_max_workers=selection_max_workers,
@@ -1517,8 +1503,6 @@ def run_generation(
     validation_rejection_count = 0
 
     for batch_no, batch in enumerate(chunk_candidates(remaining_candidates, batch_size), start=1):
-        if len(final_questions) >= max_questions:
-            break
         log_step(f"[AI batch {batch_no}/{total_batches}] candidates={len(batch)}", indent=1)
         messages = build_ai_messages(batch, allowed_question_types, full_transcript_text)
         batch_output = llm.invoke_question_batch(messages)
@@ -1537,8 +1521,6 @@ def run_generation(
             )
 
         for result in batch_output.results:
-            if len(final_questions) >= max_questions:
-                break
             candidate = batch_candidates_by_id[result.candidate_id]
             if result.question_type not in allowed_question_types:
                 validation_rejection_count += 1
@@ -1601,8 +1583,6 @@ def run_generation(
         rejected_count=existing_rejected_count + ai_rejection_count + validation_rejection_count,
         candidate_checkpoint=candidate_checkpoint,
     )
-    if len(final_output.questions) > max_questions:
-        raise ValueError("final question count exceeds max_questions")
 
     atomic_write_json(
         target_path=output_json,
@@ -1700,12 +1680,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("mapped_json", type=Path, help="Path to mapped transcript JSON.")
     parser.add_argument("output_questions_json", type=Path, help="Path to output question JSON.")
     parser.add_argument(
-        "--max-questions",
-        type=int,
-        default=DEFAULT_MAX_QUESTIONS,
-        help=f"Maximum final questions to generate. Default: {DEFAULT_MAX_QUESTIONS}.",
-    )
-    parser.add_argument(
         "--question-types",
         type=parse_question_types,
         default=parse_question_types("context_meaning_choice,context_cloze_choice"),
@@ -1768,14 +1742,12 @@ def main(argv: list[str] | None = None) -> None:
     log_step(f"selection_batch_size: {args.selection_batch_size}")
     log_step(f"selection_max_workers: {args.selection_max_workers}")
     log_step(f"question_types: {args.question_types}")
-    log_step(f"max_questions: {args.max_questions}")
     log_step(f"batch_size: {args.batch_size}")
 
     final_output = run_generation(
         mapped_json=args.mapped_json,
         output_json=args.output_questions_json,
         allowed_question_types=args.question_types,
-        max_questions=args.max_questions,
         batch_size=args.batch_size,
         llm=llm,
         model_name=args.model,

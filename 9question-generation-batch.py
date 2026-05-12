@@ -22,8 +22,7 @@ from pathlib import Path
 
 DEFAULT_SOURCE_DIR = Path("resource/The Office BD/mapped")
 DEFAULT_TARGET_DIR = Path("resource/The Office BD/questions")
-DEFAULT_MAX_WORKERS = 3
-DEFAULT_MAX_QUESTIONS = 20
+DEFAULT_MAX_WORKERS = 4
 DEFAULT_BATCH_SIZE = 10
 DEFAULT_QUESTION_TYPES = "context_meaning_choice,context_cloze_choice"
 DEFAULT_MODEL = "deepseek-v4-pro"
@@ -54,12 +53,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_MAX_WORKERS,
         help="Maximum concurrent question generation jobs.",
-    )
-    parser.add_argument(
-        "--max-questions",
-        type=int,
-        default=DEFAULT_MAX_QUESTIONS,
-        help="Maximum final questions per input file.",
     )
     parser.add_argument(
         "--question-types",
@@ -145,7 +138,6 @@ def build_pending_jobs(source_files: list[Path], target_dir: Path) -> tuple[list
 def run_single_file(
     source_path: Path,
     target_path: Path,
-    max_questions: int,
     question_types: str,
     batch_size: int,
     env_path: Path,
@@ -168,8 +160,6 @@ def run_single_file(
         str(QUESTION_SCRIPT),
         str(source_path),
         str(target_path),
-        "--max-questions",
-        str(max_questions),
         "--question-types",
         question_types,
         "--batch-size",
@@ -208,8 +198,6 @@ def main() -> None:
     args = parse_args()
     if args.max_workers < 1:
         raise SystemExit("--max-workers must be at least 1")
-    if args.max_questions < 1:
-        raise SystemExit("--max-questions must be at least 1")
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be at least 1")
     if args.selection_top_k < 1:
@@ -235,7 +223,6 @@ def main() -> None:
     print(f"源目录：{source_dir}", flush=True)
     print(f"目标目录：{target_dir}", flush=True)
     print(f"并发数：{args.max_workers}", flush=True)
-    print(f"每文件题目上限：{args.max_questions}", flush=True)
     print(f"题型：{args.question_types}", flush=True)
     print(f"候选 batch size：{args.batch_size}", flush=True)
     print(f"模型：{args.model}", flush=True)
@@ -264,7 +251,6 @@ def main() -> None:
                 run_single_file,
                 source_path,
                 target_path,
-                args.max_questions,
                 args.question_types,
                 args.batch_size,
                 args.env_path,
