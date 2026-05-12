@@ -42,6 +42,7 @@ DEFAULT_SELECTION_MAX_WORKERS = 4
 CHECKPOINT_VERSION = 1
 DEFAULT_BATCH_SIZE = 10
 DEFAULT_MAX_QUESTIONS = 20
+DEFAULT_TOOL_CALL_PARSE_MAX_ATTEMPTS = 3
 SUPPORTED_QUESTION_TYPES = {"context_meaning_choice", "context_cloze_choice"}
 EXPECTED_OPTION_IDS = ["correct", "wrong_1", "wrong_2", "wrong_3"]
 SELECTION_TOOL_NAME = "submit_context_selection_batch"
@@ -499,14 +500,22 @@ class DeepSeekToolCallLLM:
         self.model_name = model_name
 
     def invoke_question_batch(self, messages: list[dict[str, str]]) -> AIQuestionBatchOutput:
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            tools=[QUESTION_OUTPUT_TOOL],
-            reasoning_effort=DEFAULT_QUESTION_REASONING_EFFORT,
-            extra_body={"thinking": DEFAULT_QUESTION_THINKING},
-        )
-        return parse_llm_tool_call_response(response.choices[0].message)
+        last_error: Exception | None = None
+        for _ in range(DEFAULT_TOOL_CALL_PARSE_MAX_ATTEMPTS):
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                tools=[QUESTION_OUTPUT_TOOL],
+                reasoning_effort=DEFAULT_QUESTION_REASONING_EFFORT,
+                extra_body={"thinking": DEFAULT_QUESTION_THINKING},
+            )
+            try:
+                return parse_llm_tool_call_response(response.choices[0].message)
+            except (TypeError, ValueError, ValidationError) as exc:
+                last_error = exc
+        if last_error is None:
+            raise RuntimeError("DeepSeek question batch returned no parse attempts")
+        raise last_error
 
 
 class DeepSeekContextSelectionLLM:
@@ -515,16 +524,24 @@ class DeepSeekContextSelectionLLM:
         self.model_name = model_name
 
     def invoke_context_selection_batch(self, messages: list[dict[str, str]]) -> AIContextSelectionBatchOutput:
-        request_kwargs: dict[str, Any] = {
-            "model": self.model_name,
-            "messages": messages,
-            "tools": [SELECTION_OUTPUT_TOOL],
-            "extra_body": {"thinking": DEFAULT_SELECTION_THINKING},
-        }
-        if DEFAULT_SELECTION_REASONING_EFFORT is not None:
-            request_kwargs["reasoning_effort"] = DEFAULT_SELECTION_REASONING_EFFORT
-        response = self.client.chat.completions.create(**request_kwargs)
-        return parse_llm_context_selection_response(response.choices[0].message)
+        last_error: Exception | None = None
+        for _ in range(DEFAULT_TOOL_CALL_PARSE_MAX_ATTEMPTS):
+            request_kwargs: dict[str, Any] = {
+                "model": self.model_name,
+                "messages": messages,
+                "tools": [SELECTION_OUTPUT_TOOL],
+                "extra_body": {"thinking": DEFAULT_SELECTION_THINKING},
+            }
+            if DEFAULT_SELECTION_REASONING_EFFORT is not None:
+                request_kwargs["reasoning_effort"] = DEFAULT_SELECTION_REASONING_EFFORT
+            response = self.client.chat.completions.create(**request_kwargs)
+            try:
+                return parse_llm_context_selection_response(response.choices[0].message)
+            except (TypeError, ValueError, ValidationError) as exc:
+                last_error = exc
+        if last_error is None:
+            raise RuntimeError("DeepSeek context selection returned no parse attempts")
+        raise last_error
 
 
 def log_header(title: str) -> None:
@@ -974,7 +991,7 @@ def parse_first_json_object(value: str) -> dict[str, Any]:
     if not stripped:
         raise ValueError("DeepSeek tool call arguments are empty")
     try:
-        payload = json.loads(stripped)
+        payload, _ = json.JSONDecoder().raw_decode(stripped)
     except json.JSONDecodeError as exc:
         raise ValueError(f"DeepSeek tool call arguments are invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):

@@ -523,6 +523,54 @@ def test_deepseek_context_selection_llm_sends_high_reasoning_effort():
     }
 
 
+def test_deepseek_context_selection_llm_retries_malformed_tool_arguments():
+    question_gen = load_module()
+    payload = {
+        "selections": [
+            {
+                "group_id": "g_000001",
+                "sentence_candidate_id": "s_000001",
+                "reason": "上下文清楚。",
+            }
+        ]
+    }
+
+    class FakeCompletions:
+        def __init__(self):
+            self.call_count = 0
+
+        def create(self, **kwargs):
+            self.call_count += 1
+            arguments = '{"selections": [{"group_id": "g_000001" "sentence_candidate_id": "s_000001"}]}'
+            if self.call_count == 2:
+                arguments = json.dumps(payload, ensure_ascii=False)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            tool_calls=[
+                                SimpleNamespace(
+                                    function=SimpleNamespace(
+                                        name=question_gen.SELECTION_TOOL_NAME,
+                                        arguments=arguments,
+                                    )
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    completions = FakeCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    llm = question_gen.DeepSeekContextSelectionLLM(client, "fake-selection-model")
+
+    result = llm.invoke_context_selection_batch([{"role": "user", "content": "hi"}])
+
+    assert completions.call_count == 2
+    assert result.selections[0].group_id == "g_000001"
+
+
 def test_context_selection_llm_batches_run_concurrently():
     question_gen = load_module()
 
@@ -661,6 +709,54 @@ def test_deepseek_tool_call_llm_sends_tools_without_tool_choice():
     }
 
 
+def test_deepseek_tool_call_llm_retries_malformed_tool_arguments():
+    question_gen = load_module()
+    payload = {
+        "results": [],
+        "rejections": [
+            {
+                "candidate_id": "c_000001",
+                "reason": "上下文不足。",
+            }
+        ],
+    }
+
+    class FakeCompletions:
+        def __init__(self):
+            self.call_count = 0
+
+        def create(self, **kwargs):
+            self.call_count += 1
+            arguments = '{"results": [], "rejections": [{"candidate_id": "c_000001" "reason": "bad"}]}'
+            if self.call_count == 2:
+                arguments = json.dumps(payload, ensure_ascii=False)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            tool_calls=[
+                                SimpleNamespace(
+                                    function=SimpleNamespace(
+                                        name=question_gen.QUESTION_TOOL_NAME,
+                                        arguments=arguments,
+                                    )
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    completions = FakeCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    llm = question_gen.DeepSeekToolCallLLM(client, "fake-model")
+
+    result = llm.invoke_question_batch([{"role": "user", "content": "hi"}])
+
+    assert completions.call_count == 2
+    assert result.rejections[0].candidate_id == "c_000001"
+
+
 def test_validate_context_selection_requires_one_selection_per_group():
     question_gen = load_module()
     candidates = select_first_sentence_candidates(question_gen)
@@ -783,7 +879,7 @@ def test_parse_llm_tool_call_response_accepts_valid_arguments():
     assert result.rejections[0].candidate_id == "c_000001"
 
 
-def test_parse_llm_tool_call_response_rejects_extra_data_after_json_object():
+def test_parse_llm_tool_call_response_accepts_first_json_object_with_extra_data():
     question_gen = load_module()
     payload = {
         "results": [],
@@ -805,8 +901,9 @@ def test_parse_llm_tool_call_response_rejects_extra_data_after_json_object():
         ]
     )
 
-    with pytest.raises(ValueError, match="Extra data"):
-        question_gen.parse_llm_tool_call_response(message)
+    result = question_gen.parse_llm_tool_call_response(message)
+
+    assert result.rejections[0].candidate_id == "c_000001"
 
 
 def test_parse_llm_tool_call_response_rejects_missing_rejections():
