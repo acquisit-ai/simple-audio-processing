@@ -1,12 +1,13 @@
 import os
 import json
 import argparse
+import subprocess
 from pathlib import Path
 from typing import List
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from google import genai
+from google.genai.types import GenerateContentConfig, HttpOptions, ThinkingConfig
 
 # ==========================================
 # 1. 定义结构化输出数据模型
@@ -53,28 +54,161 @@ class LLMClipResponse(BaseModel):
 # clips：切片数组
 
 # ==========================================
-# 2. 初始化运行环境与 LLM
-#    - 从 .env 读取 OPENAI_API_KEY
-#    - 初始化 ChatOpenAI
-#    - 用 with_structured_output 锁定模型输出 schema
+# 2. 初始化运行环境与 Gemini
+#    - 从 .env 读取 Google Cloud / Vertex AI 配置
+#    - 初始化 google-genai Vertex AI client
+#    - 用 response_schema 锁定模型输出 schema
 #    - 定义后处理 buffer 参数，供视频裁切阶段复用
 # ==========================================
-# 从 .env 加载环境变量，便于本地开发直接读取 API Key
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY environment variable is required")
-
-llm = ChatOpenAI(
-    api_key=OPENAI_API_KEY,
-    model="gpt-5.4", # 必须使用支持严格结构化输出的模型
-    # gpt-5.* 在 reasoning_effort != "none" 时不支持自定义 temperature
-    reasoning_effort="medium",
+DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_VERTEX_LOCATION = "global"
+DEFAULT_GEMINI_THINKING_LEVEL = "high"
+GEMINI_MODEL = os.getenv("GEMINI_CLIPPING_MODEL", DEFAULT_GEMINI_MODEL)
+GEMINI_THINKING_LEVEL = os.getenv(
+    "GEMINI_THINKING_LEVEL",
+    DEFAULT_GEMINI_THINKING_LEVEL,
+).lower()
+VERTEX_LOCATION = (
+    os.getenv("GOOGLE_CLOUD_LOCATION")
+    or os.getenv("GOOGLE_VERTEX_LOCATION")
+    or DEFAULT_VERTEX_LOCATION
 )
 
-# 绑定结构化输出模型，要求 LLM 严格按 LLMClipResponse 返回
-structured_llm = llm.with_structured_output(LLMClipResponse)
+if GEMINI_THINKING_LEVEL not in {"low", "high"}:
+    raise ValueError(
+        "GEMINI_THINKING_LEVEL must be 'low' or 'high' for Gemini 3 Pro models"
+    )
+
+
+def get_gcloud_project() -> str | None:
+    """Read the active gcloud project when GOOGLE_CLOUD_PROJECT is not set."""
+
+    try:
+        completed = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+
+    project = completed.stdout.strip()
+    if completed.returncode != 0 or not project or project == "(unset)":
+        return None
+    return project
+
+
+VERTEX_PROJECT = (
+    os.getenv("GOOGLE_CLOUD_PROJECT")
+    or os.getenv("GCLOUD_PROJECT")
+    or get_gcloud_project()
+)
+
+if not VERTEX_PROJECT:
+    raise ValueError(
+        "Google Cloud project is required. Set GOOGLE_CLOUD_PROJECT, "
+        "or run: gcloud config set project <PROJECT_ID>"
+    )
+
+# 明确使用 Vertex AI。认证走 Application Default Credentials:
+# gcloud auth application-default login
+client = genai.Client(
+    vertexai=True,
+    project=VERTEX_PROJECT,
+    location=VERTEX_LOCATION,
+    http_options=HttpOptions(api_version="v1"),
+)
+
+CLIP_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "clips": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "clip_id": {
+                        "type": "INTEGER",
+                        "description": "Sequential clip identifier, starting at 1.",
+                    },
+                    "title": {
+                        "type": "STRING",
+                        "description": "Short user-facing clip title in Simplified Chinese.",
+                    },
+                    "description": {
+                        "type": "STRING",
+                        "description": "Concise user-facing clip description in Simplified Chinese.",
+                    },
+                    "start_index": {
+                        "type": "INTEGER",
+                        "description": "Index of the first sentence in the clip.",
+                    },
+                    "end_index": {
+                        "type": "INTEGER",
+                        "description": "Index of the last sentence in the clip.",
+                    },
+                    "start_time": {
+                        "type": "INTEGER",
+                        "description": "Original start timestamp in milliseconds for the first sentence, used only for self-checking.",
+                    },
+                    "end_time": {
+                        "type": "INTEGER",
+                        "description": "Original end timestamp in milliseconds for the last sentence, used only for self-checking.",
+                    },
+                    "reasoning": {
+                        "type": "STRING",
+                        "description": "Brief explanation in Simplified Chinese of why these boundaries were chosen.",
+                    },
+                },
+                "required": [
+                    "clip_id",
+                    "title",
+                    "description",
+                    "start_index",
+                    "end_index",
+                    "start_time",
+                    "end_time",
+                    "reasoning",
+                ],
+                "propertyOrdering": [
+                    "clip_id",
+                    "title",
+                    "description",
+                    "start_index",
+                    "end_index",
+                    "start_time",
+                    "end_time",
+                    "reasoning",
+                ],
+            },
+        },
+    },
+    "required": ["clips"],
+    "propertyOrdering": ["clips"],
+}
+
+
+def invoke_structured_gemini(prompt: str) -> LLMClipResponse:
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0,
+            candidate_count=1,
+            response_mime_type="application/json",
+            response_schema=CLIP_RESPONSE_SCHEMA,
+            thinking_config=ThinkingConfig(
+                thinking_level=GEMINI_THINKING_LEVEL,
+            ),
+        ),
+    )
+    if not response.text:
+        raise ValueError("Gemini returned an empty response")
+    return LLMClipResponse.model_validate_json(response.text)
 
 # 以下参数用于“精确时间 -> 带缓冲时间”的后处理
 # 思路是 gap-based + clamp + 左小右大 + 安全边界
@@ -464,25 +598,26 @@ def process_transcript_pipeline(input_filepath: str, output_filepath: str | None
     # 步骤 3：第一轮切片
     # 让模型同时输出边界与辅助时间，便于其自查时长和闭环性
     print("🚀 [1/3] 执行初次切片生成...")
-    # HumanMessage 中文对照：请对以下台词进行语义切片：
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=f"Please perform semantic clipping on the following transcript:\n{transcript_text}")
-    ]
-    
-    # structured_llm 会直接返回 LLMClipResponse 对象
-    initial_response_obj = structured_llm.invoke(messages)
+    initial_prompt = (
+        "Please perform semantic clipping on the following transcript:\n"
+        f"{transcript_text}"
+    )
+
+    initial_response_obj = invoke_structured_gemini(initial_prompt)
     
     # 步骤 4：第二轮反思优化
-    # 把第一次结果作为 AIMessage 回灌，让模型自查边界质量
+    # 把第一次结果回灌给模型，让模型自查边界质量
     print("🔍 [2/3] 执行自我反思与优化...")
     ai_memory_str = initial_response_obj.model_dump_json(indent=2, ensure_ascii=False)
     
-    messages.append(AIMessage(content=ai_memory_str))
-    messages.append(HumanMessage(content=REFLECTION_PROMPT))
-    
+    reflection_prompt = (
+        "Previous clipping plan:\n"
+        f"{ai_memory_str}\n\n"
+        f"{REFLECTION_PROMPT}"
+    )
+
     # 再次调用，得到最终的边界结果
-    final_response_obj = structured_llm.invoke(messages)
+    final_response_obj = invoke_structured_gemini(reflection_prompt)
 
     # 步骤 5：先校验边界是否合法，再做时间回填
     # 注意：即便模型给出的 start_time / end_time 有偏差，最终仍以 transcript 为准

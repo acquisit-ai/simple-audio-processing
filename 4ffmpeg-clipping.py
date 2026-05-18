@@ -9,6 +9,13 @@ import subprocess
 from pathlib import Path
 
 
+DEFAULT_OUTPUT_HEIGHT = 720
+DEFAULT_VIDEO_BITRATE = "1700k"
+DEFAULT_MAXRATE = "2500k"
+DEFAULT_BUFSIZE = "4500k"
+DEFAULT_GOP_SIZE = 48
+
+
 # ==========================================
 # 1. 基础工具
 #    - 检查 ffmpeg 是否存在
@@ -130,9 +137,9 @@ def rebase_timing_fields(payload: dict, time_offset_ms: int) -> None:
 # 3. 视频切片工具
 #    - 默认优先使用 buffered_start_time / buffered_end_time
 #    - 若不存在，则退回 start_time / end_time
-#    - 输出 MP4，重编码主视频和主音频，避免 stream copy 回退到关键帧
-#    - 优先使用 macOS VideoToolbox H.264，失败时回退到 libx264
-#    - 质量目标接近常见短视频平台
+#    - 输出 720p HEVC MP4，重编码主视频，保留原始音频流
+#    - 优先使用 macOS VideoToolbox HEVC，失败时回退到 libx265
+#    - 参数与 0normalize-original-video.py 对齐
 # ==========================================
 def resolve_clip_times(clip_plan: dict) -> tuple[int, int]:
     start_time = clip_plan.get("buffered_start_time", clip_plan["start_time"])
@@ -154,6 +161,11 @@ def cut_video_clip(
     output_video_path: Path,
     start_time_ms: int,
     end_time_ms: int,
+    output_height: int = DEFAULT_OUTPUT_HEIGHT,
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE,
+    maxrate: str = DEFAULT_MAXRATE,
+    bufsize: str = DEFAULT_BUFSIZE,
+    gop_size: int = DEFAULT_GOP_SIZE,
 ) -> None:
     output_video_path.parent.mkdir(parents=True, exist_ok=True)
     duration_ms = end_time_ms - start_time_ms
@@ -178,43 +190,47 @@ def cut_video_clip(
     ]
     common_output_args = [
         "-g",
-        "48",
+        str(gop_size),
         "-pix_fmt",
         "yuv420p",
         "-tag:v",
-        "avc1",
+        "hvc1",
         "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
+        "copy",
         "-movflags",
         "+faststart",
         str(output_video_path),
     ]
     videotoolbox_command = [
         *common_input_args,
+        "-vf",
+        f"scale=-2:{output_height}:flags=lanczos",
         "-c:v",
-        "h264_videotoolbox",
+        "hevc_videotoolbox",
+        "-spatial_aq",
+        "1",
         "-b:v",
-        "6500k",
+        video_bitrate,
         "-maxrate",
-        "8000k",
+        maxrate,
         "-bufsize",
-        "12000k",
+        bufsize,
         *common_output_args,
     ]
-    libx264_command = [
+    libx265_command = [
         *common_input_args,
+        "-vf",
+        f"scale=-2:{output_height}:flags=lanczos",
         "-c:v",
-        "libx264",
+        "libx265",
         "-preset",
-        "veryfast",
-        "-crf",
-        "20",
+        "medium",
+        "-b:v",
+        video_bitrate,
         "-maxrate",
-        "8000k",
+        maxrate,
         "-bufsize",
-        "12000k",
+        bufsize,
         *common_output_args,
     ]
 
@@ -222,10 +238,10 @@ def cut_video_clip(
     if result.returncode != 0:
         first_error_message = summarize_ffmpeg_error(result.stderr, result.stdout)
         print(
-            "⚠️  VideoToolbox 编码失败，改用 libx264 CPU 编码。"
+            "⚠️  VideoToolbox HEVC 编码失败，改用 libx265 CPU 编码。"
             f" 原因: {first_error_message}"
         )
-        result = subprocess.run(libx264_command, capture_output=True, text=True, check=False)
+        result = subprocess.run(libx265_command, capture_output=True, text=True, check=False)
 
     if result.returncode != 0:
         error_message = summarize_ffmpeg_error(result.stderr, result.stdout)
