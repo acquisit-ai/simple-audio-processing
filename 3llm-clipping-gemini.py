@@ -266,14 +266,35 @@ def print_usage_metadata(prefix: str, usage_metadata: object | None) -> None:
     print(f"{prefix} usage_metadata: {usage_metadata}", flush=True)
 
 
+def validate_video_gcs_uri(video_gcs_uri: str) -> None:
+    if not video_gcs_uri:
+        raise ValueError("--video-gcs-uri 是必填参数")
+    if not video_gcs_uri.startswith("gs://"):
+        raise ValueError("--video-gcs-uri 必须是 gs:// 开头的 Cloud Storage 对象地址")
+
+    try:
+        completed = subprocess.run(
+            ["gcloud", "storage", "objects", "describe", video_gcs_uri],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("需要安装 gcloud CLI 才能校验 --video-gcs-uri") from exc
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise FileNotFoundError(
+            f"--video-gcs-uri 不存在、无权限访问或无法读取: {video_gcs_uri}"
+            + (f"\n{detail}" if detail else "")
+        )
+
+
 def create_video_context_cache(
     video_gcs_uri: str,
     video_mime_type: str = "video/mp4",
     cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
 ) -> str:
-    if not video_gcs_uri.startswith("gs://"):
-        raise ValueError("--video-gcs-uri 必须是 gs:// 开头的 Cloud Storage 对象地址")
-
     print(f"🎞️  创建视频 explicit context cache: {video_gcs_uri}", flush=True)
     cache_display_name = build_cache_display_name(video_gcs_uri)
     cache = client.caches.create(
@@ -753,6 +774,7 @@ def process_transcript_pipeline(
     cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
 ):
     input_path = Path(input_filepath)
+    validate_video_gcs_uri(video_gcs_uri or "")
     
     # 步骤 1：读取原始 transcript JSON
     if not input_path.exists():
@@ -766,13 +788,11 @@ def process_transcript_pipeline(
     transcript_text = json.dumps(cleaned_transcript_data, ensure_ascii=False)
     index_constraint_text = get_index_constraint_text(transcript_data)
 
-    cached_content_name = None
-    if video_gcs_uri:
-        cached_content_name = create_video_context_cache(
-            video_gcs_uri=video_gcs_uri,
-            video_mime_type=video_mime_type,
-            cache_ttl_seconds=cache_ttl_seconds,
-        )
+    cached_content_name = create_video_context_cache(
+        video_gcs_uri=video_gcs_uri,
+        video_mime_type=video_mime_type,
+        cache_ttl_seconds=cache_ttl_seconds,
+    )
     
     try:
         # 步骤 3：第一轮切片
@@ -866,8 +886,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--video-gcs-uri",
-        default=None,
-        help="可选：GCS 视频对象地址，例如 gs://bucket/path/video.mp4；提供后会创建 explicit context cache 并作为多模态上下文",
+        required=True,
+        help="必填：GCS 视频对象地址，例如 gs://bucket/path/video.mp4；会先校验对象存在，再创建 explicit context cache 作为多模态上下文",
     )
     parser.add_argument(
         "--video-mime-type",

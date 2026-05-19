@@ -9,14 +9,17 @@ from pathlib import Path
 # 1. 批处理配置
 #    - 默认扫描 2cleaned-data/ 下的所有 JSON 文件
 #    - 默认输出到 3clipped/ 下并保持同名
+#    - 默认从 GCS 视频目录拼接同名 .mp4 作为多模态输入
+#    - 如果目标输出已存在，则跳过该输入文件
 #    - 默认使用 5 个并发工作线程
 #    - 单文件失败时自动重试 1 次
 # ==========================================
 DEFAULT_INPUT_DIR = Path("2cleaned-data")
 DEFAULT_OUTPUT_DIR = Path("3clipped")
+DEFAULT_VIDEO_GCS_DIR = "gs://videos2077/test-video/original/"
 DEFAULT_MAX_WORKERS = 5
 DEFAULT_MAX_RETRIES = 1
-CLIPPING_SCRIPT = Path("3llm-clipping.py")
+CLIPPING_SCRIPT = Path("3llm-clipping-gemini.py")
 
 
 # ==========================================
@@ -25,14 +28,24 @@ CLIPPING_SCRIPT = Path("3llm-clipping.py")
 #    - 这样可以避免多个线程共享同一个 LLM 客户端实例
 #    - 返回结构化结果，方便主线程汇总成功与失败
 # ==========================================
-def process_one_file(input_path: Path, output_dir: Path) -> dict:
+def build_video_gcs_uri(video_gcs_dir: str, input_path: Path) -> str:
+    """根据输入 JSON 文件名拼出同名 GCS mp4 地址。"""
+
+    normalized_dir = video_gcs_dir.rstrip("/") + "/"
+    return f"{normalized_dir}{input_path.stem}.mp4"
+
+
+def process_one_file(input_path: Path, output_dir: Path, video_gcs_dir: str) -> dict:
     output_path = output_dir / input_path.name
+    video_gcs_uri = build_video_gcs_uri(video_gcs_dir, input_path)
     command = [
         sys.executable,
         str(CLIPPING_SCRIPT),
         str(input_path),
         "--output",
         str(output_path),
+        "--video-gcs-uri",
+        video_gcs_uri,
     ]
 
     try:
@@ -46,6 +59,7 @@ def process_one_file(input_path: Path, output_dir: Path) -> dict:
         return {
             "input_path": input_path,
             "output_path": output_path,
+            "video_gcs_uri": video_gcs_uri,
             "returncode": completed.returncode,
             "stdout": completed.stdout,
             "stderr": completed.stderr,
@@ -54,6 +68,7 @@ def process_one_file(input_path: Path, output_dir: Path) -> dict:
         return {
             "input_path": input_path,
             "output_path": output_path,
+            "video_gcs_uri": video_gcs_uri,
             "returncode": 1,
             "stdout": "",
             "stderr": f"{type(exc).__name__}: {exc}",
@@ -69,6 +84,7 @@ def process_one_file(input_path: Path, output_dir: Path) -> dict:
 def process_one_file_with_retry(
     input_path: Path,
     output_dir: Path,
+    video_gcs_dir: str,
     task_number: int,
     total_files: int,
     max_retries: int = DEFAULT_MAX_RETRIES,
@@ -78,7 +94,7 @@ def process_one_file_with_retry(
     last_result = None
 
     for attempt in range(max_retries + 1):
-        result = process_one_file(input_path, output_dir)
+        result = process_one_file(input_path, output_dir, video_gcs_dir)
         result["attempt"] = attempt + 1
         result["max_attempts"] = max_retries + 1
         result["task_number"] = task_number
@@ -140,38 +156,60 @@ def format_progress_line(
 def process_all_files(
     input_dir: Path,
     output_dir: Path,
+    video_gcs_dir: str,
     max_workers: int = DEFAULT_MAX_WORKERS,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> int:
     input_files = collect_input_files(input_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    skipped_files = [
+        input_path
+        for input_path in input_files
+        if (output_dir / input_path.name).exists()
+    ]
+    pending_files = [
+        input_path
+        for input_path in input_files
+        if not (output_dir / input_path.name).exists()
+    ]
+
     total_files = len(input_files)
+    total_to_run = len(pending_files)
     success_results = []
     failed_results = []
 
-    print(f"待处理文件数: {total_files}", flush=True)
+    print(f"源文件总数: {total_files}", flush=True)
+    print(f"已跳过: {len(skipped_files)}", flush=True)
+    print(f"待处理文件数: {total_to_run}", flush=True)
     print(f"输出目录: {output_dir}", flush=True)
+    print(f"GCS 视频目录: {video_gcs_dir.rstrip('/') + '/'}", flush=True)
     print(f"并发线程数: {max_workers}", flush=True)
     print(f"失败重试次数: {max_retries}", flush=True)
+
+    if total_to_run == 0:
+        print("没有需要新处理的文件。", flush=True)
+        return 0
+
     print("已提交全部任务，开始并发处理...\n", flush=True)
 
     task_info_map = {
         input_path: {
             "task_number": index,
-            "total_files": total_files,
+            "total_files": total_to_run,
         }
-        for index, input_path in enumerate(input_files, start=1)
+        for index, input_path in enumerate(pending_files, start=1)
     }
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {}
-        for input_path in input_files:
+        for input_path in pending_files:
             task_info = task_info_map[input_path]
             future = executor.submit(
                 process_one_file_with_retry,
                 input_path,
                 output_dir,
+                video_gcs_dir,
                 task_info["task_number"],
                 task_info["total_files"],
                 max_retries,
@@ -193,14 +231,14 @@ def process_all_files(
                     print(
                         f"[{task_info['task_number']}/{task_info['total_files']}] "
                         f"完成处理: {input_path.name} | 重试后成功 (第 {result['attempt']} 次) | "
-                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}",
+                        f"{format_progress_line(completed_count, total_to_run, len(success_results), len(failed_results), retried_success_count)}",
                         flush=True,
                     )
                 else:
                     print(
                         f"[{task_info['task_number']}/{task_info['total_files']}] "
                         f"完成处理: {input_path.name} | 成功 | "
-                        f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}",
+                        f"{format_progress_line(completed_count, total_to_run, len(success_results), len(failed_results), retried_success_count)}",
                         flush=True,
                     )
             else:
@@ -208,7 +246,8 @@ def process_all_files(
                 print(
                     f"[{task_info['task_number']}/{task_info['total_files']}] "
                     f"完成处理: {input_path.name} | 失败 (已尝试 {result['attempt']}/{result['max_attempts']} 次) | "
-                    f"{format_progress_line(completed_count, total_files, len(success_results), len(failed_results), retried_success_count)}",
+                    f"视频: {result.get('video_gcs_uri', '')} | "
+                    f"{format_progress_line(completed_count, total_to_run, len(success_results), len(failed_results), retried_success_count)}",
                     flush=True,
                 )
                 if result["stderr"].strip():
@@ -217,6 +256,9 @@ def process_all_files(
                     print(result["stdout"].strip(), flush=True)
 
     print("\n批处理完成", flush=True)
+    print(f"源文件总数: {total_files}", flush=True)
+    print(f"跳过: {len(skipped_files)}", flush=True)
+    print(f"执行: {total_to_run}", flush=True)
     print(f"成功: {len(success_results)}", flush=True)
     print(f"失败: {len(failed_results)}", flush=True)
     print(f"重试后成功: {retried_success_count}", flush=True)
@@ -248,6 +290,11 @@ if __name__ == "__main__":
         help="输出目录，默认 3clipped",
     )
     parser.add_argument(
+        "--video-gcs-dir",
+        default=DEFAULT_VIDEO_GCS_DIR,
+        help=f"GCS 视频目录，默认 {DEFAULT_VIDEO_GCS_DIR}；会拼接输入 JSON 同名 .mp4",
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=DEFAULT_MAX_WORKERS,
@@ -264,6 +311,7 @@ if __name__ == "__main__":
     exit_code = process_all_files(
         input_dir=Path(args.input_dir),
         output_dir=Path(args.output_dir),
+        video_gcs_dir=args.video_gcs_dir,
         max_workers=args.max_workers,
         max_retries=args.max_retries,
     )

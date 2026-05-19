@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -26,40 +27,113 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai.types import GenerateContentConfig, HttpOptions, ThinkingConfig
-from pydantic import BaseModel, ConfigDict, ValidationError
+from google.genai.types import (
+    Content,
+    CreateCachedContentConfig,
+    GenerateContentConfig,
+    HttpOptions,
+    Part,
+    ThinkingConfig,
+)
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_VERTEX_LOCATION = "global"
-DEFAULT_QUESTION_MODEL = "gemini-3.1-pro-preview"
-DEFAULT_QUESTION_THINKING_LEVEL = "high"
 DEFAULT_SELECTION_MODEL = "gemini-3.1-flash-lite-preview"
 DEFAULT_SELECTION_THINKING_LEVEL = "high"
+DEFAULT_QUESTION_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_QUESTION_THINKING_LEVEL = "high"
 ALLOWED_GEMINI_THINKING_LEVELS = {"low", "medium", "high"}
 DEFAULT_SELECTION_TOP_K = 6
-DEFAULT_SELECTION_BATCH_SIZE = 15
+DEFAULT_SELECTION_BATCH_SIZE = 12
 DEFAULT_SELECTION_MAX_WORKERS = 4
-CHECKPOINT_VERSION = 2
-DEFAULT_BATCH_SIZE = 15
+DEFAULT_CANDIDATE_SCORE_THRESHOLD = 6
+DEFAULT_CACHE_TTL_SECONDS = 30 * 60
+DEFAULT_VIDEO_MIME_TYPE = "video/mp4"
+CHECKPOINT_VERSION = 3
+DEFAULT_BATCH_SIZE = 12
 SUPPORTED_QUESTION_TYPES = {"context_meaning_choice", "context_cloze_choice"}
 EXPECTED_OPTION_IDS = ["correct", "wrong_1", "wrong_2", "wrong_3"]
+CANDIDATE_SCORE_WEIGHTS = {
+    "visual_context": 0.10,
+    "context_clarity": 0.35,
+    "learning_value": 0.25,
+    "question_fit": 0.30,
+}
+
+
+SELECTION_SYSTEM_PROMPT = """
+你是英语学习题目的上下文选择器。你的任务不是出题，也不是筛掉单词，而是为每个 coarse unit 在它出现过的句子中选择一个最适合后续学习和出题的 ref，并给出可用于脚本筛选的评分。
+
+输入说明：
+- FULL_VIDEO_TRANSCRIPT 是完整字幕；如果调用方提供了视频缓存，你还可以同时参考完整视频画面、声音、说话人语气和场景变化。
+- CURRENT_CONTEXT_SELECTION_GROUPS 中的每个 group 代表一个 coarse unit。
+- 每个 group 内有多个 sentence_candidates，它们都是该 coarse unit 在视频中真实出现过的位置。
+
+硬性规则：
+- 每个 group 必须选择且只能选择一个 sentence_candidate_id。
+- sentence_candidate_id 必须来自当前 group 的 sentence_candidates，group_id 必须原样返回。
+- 不要拒绝、不要跳过、不要合并 group，也不要为同一个 group 返回多个选择。
+- 即使某个词不适合出题、画面帮助很弱、句子很普通，也必须选择一个 ref；这些问题只通过 scores 体现，后续脚本会决定是否成为 Candidate。
+- 不要改写目标词、不要自行创造句子、不要输出 schema 之外的字段。
+
+选择标准：
+- 优先选择目标词或短语含义最清楚、上下文最完整、句子本身可独立理解的一次出现。
+- 如果多个句子都可用，优先选择说话目的明确、上下文不依赖大量前情、画面或语气能辅助理解的句子。
+- 如果目标词在某句里只是人名、专名、寒暄、语气词、歌词或难以形成学习点，也仍然选最清楚的一句，但给较低分。
+- 选择时以 transcript 里的候选句和时间为准；视频只用于判断画面、声音和上下文是否帮助理解，不要根据视频改动候选边界。
+
+评分规则：
+- scores 中四个字段都必须是 0 到 10 的整数，0 表示完全不适合，10 表示非常适合。
+- visual_context：视频画面、动作、表情、物件、声音或语气是否直接帮助理解目标词。纯对白且画面无帮助通常较低；画面能直接展示含义或情绪时较高。
+- context_clarity：当前句子及邻近上下文是否足以让学习者理解目标词在此处的意思。上下文越独立、指代越少、语义越明确，分数越高。
+- learning_value：该词或短语是否值得中文学习者学习。常见但有用的表达、地道搭配、语境化含义、可迁移用法分数更高；专名、一次性梗、无稳定学习价值的内容分数更低。
+- question_fit：该 ref 是否适合后续生成唯一正确答案的选择题。正确答案清楚、错误项容易设计且不会出现多个可接受答案时分数更高。
+- reason 必须使用中文，简短说明为什么选择该句，以及必要时说明主要扣分点。
+""".strip()
 
 QUESTION_SYSTEM_PROMPT = """
-你是英语学习题目生成器。你只根据输入 candidates 生成视频上下文选择题内容。
+你是英语学习题目生成器。你的任务是根据输入的 candidates 生成适合中文学习者的视频上下文选择题；如果某个 candidate 不适合生成高质量题目，可以主动拒绝。
 
-ROLE AND BOUNDARY:
-- 你只能生成题目内容，必须返回符合结构化 schema 的 results 和 rejections，不要额外解释。
-- 只根据当前输入 batch 的 candidates 判断是否生成题目。
-- 题目面向中文读者：question 和 explanation 必须使用中文。
-- context_meaning_choice 的 options.text 必须使用中文释义。
-- context_cloze_choice 的 options.text 应使用英文单词或短语。
-- context_text 保持英文视频原句或英文 cloze 上下文。
+输出边界：
+- 当前 batch 中的每个 candidate 最多生成一道题；不要为同一个 candidate 同时生成 result 和 rejection。
+- 如果能生成高质量题目，把它放入 results；如果不能，放入 rejections，并用中文给出简短原因。
+- candidate_id 必须原样返回，不要改写。不要凭空添加 candidates 之外的目标词，也不要使用 batch 外的 candidate_id。
 
-CONTENT EXAMPLES:
+语言和字段规则：
+- question 必须使用中文，直接问学习者要判断的内容。
+- explanation 必须使用中文，只解释为什么 correct 是正确答案；不要逐项解释所有错误项。
+- context_text 必须保留英文上下文。context_meaning_choice 使用英文原句或足够完整的英文片段；context_cloze_choice 使用英文挖空句。
+- context_meaning_choice 的 options.text 必须是中文释义或中文解释。
+- context_cloze_choice 的 options.text 必须是英文单词或短语。
+- options 必须恰好四个，id 顺序必须是 correct、wrong_1、wrong_2、wrong_3。
+
+题型选择：
+- context_meaning_choice 适合考察目标词或短语在当前语境里的含义，尤其是多义词、短语动词、地道表达、比喻用法。
+- context_cloze_choice 适合考察固定搭配、短语动词、介词搭配、常见表达，以及能自然挖空且不会泄露答案的句子。
+- 如果两种题型都可行，选择更能体现当前视频语境的一种。
+- 如果 allowed_question_types 只允许一种题型，只能使用该题型；如果该题型不适合，就拒绝该 candidate。
+
+出题质量要求：
+- 题目必须有唯一正确答案。错误项不能和正确答案在当前语境中同样成立，也不能只是正确答案的近义改写。
+- 错误项应有迷惑性，但必须可以被当前上下文排除；不要使用明显荒谬、语法完全不匹配、长度风格极不协调的选项。
+- 不要用 candidate 的中文释义直接泄露答案；question 不要写成“请选择 xxx 的正确释义”这种只考字典记忆的形式，应该结合 context_text。
+- 对 context_cloze_choice，context_text 必须包含 ____，并且不能保留目标词或目标短语本身。
+- 对 context_cloze_choice，错误项放回原句后应语义或搭配不自然；不要选择放回去也基本正确的近义表达。
+- 对 context_meaning_choice，正确选项应贴合目标词在当前句子里的具体意思，不要只给过宽泛的字典释义。
+
+主动拒绝标准：
+- 当前上下文不足以判断目标词含义。
+- 目标词在该句里主要是人名、地名、品牌名、影视角色名或其他专有名词。
+- 目标词只是语气词、填充词、无稳定学习价值的口头碎片。
+- 无法设计三个在当前语境下明确错误且不误导的选项。
+- 挖空后会泄露答案，或不挖空就无法形成自然英文句子。
+
+内容示例：
 - 正面例子 context_meaning_choice：如果目标词是 sacred，当前句子是 "The most sacred thing I do is care and provide for my workers."，题目可以问“这里的 sacred 最接近什么意思？”。正确选项可表达“神圣、非常重要”。错误项可以是“普通、随便”“昂贵、奢侈”“快速、临时”，因为它们和当前语境下 sacred 的“重要、不可轻视”不一致。解释只说明 sacred 在这里是比喻用法，表示说话人认为这件事非常重要、不可轻视。
-- 反面例子 context_meaning_choice：不要把“重要、有意义”作为 sacred 的错误项，因为它和正确含义过近，放在当前语境里也能成立；这类错误项为什么不好：它不是合格错误项，会让题目出现多个可接受答案。
+- 反面例子 context_meaning_choice：不要把“重要、有意义”作为 sacred 的错误项，因为它和正确含义过近，放在当前语境里也能成立；这类错误项会造成多个可接受答案。
 - 正面例子 context_cloze_choice：如果目标短语是 provide for，当前句子是 "The most sacred thing I do is care and provide for my workers."，上下文应改写为 "The most sacred thing I do is care and ____ my workers."。正确选项应是 "provide for"。错误项可以是 "take off"、"work out"、"look up"，因为它们放回原句后语义或语法不自然。
-- 反面例子 context_cloze_choice：不要把 "look after" 作为 provide for 的错误项；在 "care and ____ my workers" 里，它在语境和语法上也可能成立。它不是合格错误项，因为学习者选择它并不一定错。
+- 反面例子 context_cloze_choice：不要把 "look after" 作为 provide for 的错误项；在 "care and ____ my workers" 里，它在语境和语法上也可能成立，因此不是合格错误项。
 """.strip()
 
 
@@ -101,11 +175,21 @@ class AIQuestionBatchOutput(BaseModel):
     rejections: list[AIRejection]
 
 
+class AIContextSelectionScores(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    visual_context: int = Field(ge=0, le=10)
+    context_clarity: int = Field(ge=0, le=10)
+    learning_value: int = Field(ge=0, le=10)
+    question_fit: int = Field(ge=0, le=10)
+
+
 class AIContextSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     group_id: str
     sentence_candidate_id: str
+    scores: AIContextSelectionScores
     reason: str
 
 
@@ -136,9 +220,20 @@ class FinalSource(BaseModel):
 
 
 class FinalAudit(BaseModel):
+    ref_count: int
     candidate_count: int
+    candidate_filtered_count: int
     generated_count: int
     rejected_count: int
+
+
+class RefScores(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    visual_context: int
+    context_clarity: int
+    learning_value: int
+    question_fit: int
 
 
 class QuestionCandidatePayload(BaseModel):
@@ -159,6 +254,9 @@ class QuestionCandidatePayload(BaseModel):
     token_index: int
     token_explanation: str
     score: int
+    scores: RefScores
+    candidate_score: float
+    selection_reason: str
 
 
 class CandidateCheckpoint(BaseModel):
@@ -167,6 +265,7 @@ class CandidateCheckpoint(BaseModel):
     version: int
     selection_model: str
     selection_top_k: int
+    candidate_score_threshold: float
     allowed_question_types: list[str]
     candidates: list[QuestionCandidatePayload]
 
@@ -175,8 +274,13 @@ class SelectedCoarseUnitRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     coarse_unit_id: int
+    target_text: str
     sentence_index: int
     token_index: int
+    scores: RefScores
+    candidate_score: float
+    question_reject_reason: str | None
+    selection_reason: str
 
 
 class SelectedCoarseUnitRefs(BaseModel):
@@ -185,6 +289,8 @@ class SelectedCoarseUnitRefs(BaseModel):
     version: int
     selection_model: str
     selection_top_k: int
+    candidate_score_threshold: float
+    score_weights: dict[str, float]
     allowed_question_types: list[str]
     refs: list[SelectedCoarseUnitRef]
 
@@ -268,6 +374,9 @@ class ContextSelectionGroup:
 @dataclass(frozen=True)
 class QuestionCandidate(QuestionOccurrence):
     candidate_id: str
+    scores: RefScores
+    candidate_score: float
+    selection_reason: str
 
     def to_ai_payload(self) -> dict[str, Any]:
         return {
@@ -308,19 +417,27 @@ class GeminiStructuredLLM:
         self.thinking_level = thinking_level
         self.schema = schema
 
-    def invoke(self, messages: list[dict[str, str]]) -> BaseModel:
+    def invoke(
+        self,
+        messages: list[dict[str, str]],
+        cached_content_name: str | None = None,
+    ) -> BaseModel:
         system_instruction, contents = split_gemini_messages(messages)
+        config_kwargs: dict[str, Any] = {
+            "response_mime_type": "application/json",
+            "response_schema": self.schema,
+            "thinking_config": ThinkingConfig(
+                thinking_level=self.thinking_level,
+            ),
+        }
+        if cached_content_name:
+            config_kwargs["cached_content"] = cached_content_name
+        else:
+            config_kwargs["system_instruction"] = system_instruction
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=contents,
-            config=GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=self.schema,
-                thinking_config=ThinkingConfig(
-                    thinking_level=self.thinking_level,
-                ),
-            ),
+            config=GenerateContentConfig(**config_kwargs),
         )
         print_usage_metadata(f"🤖 Gemini {self.model_name}", response.usage_metadata)
         parsed = getattr(response, "parsed", None)
@@ -361,8 +478,15 @@ class GeminiContextSelectionLLM:
             schema=AIContextSelectionBatchOutput,
         )
 
-    def invoke_context_selection_batch(self, messages: list[dict[str, str]]) -> AIContextSelectionBatchOutput:
-        result = self.structured_llm.invoke(messages)
+    def invoke_context_selection_batch(
+        self,
+        messages: list[dict[str, str]],
+        cached_content_name: str | None = None,
+    ) -> AIContextSelectionBatchOutput:
+        result = self.structured_llm.invoke(
+            messages,
+            cached_content_name=cached_content_name,
+        )
         if isinstance(result, AIContextSelectionBatchOutput):
             return result
         return AIContextSelectionBatchOutput.model_validate(result.model_dump())
@@ -390,6 +514,84 @@ def print_usage_metadata(prefix: str, usage_metadata: object | None) -> None:
     if usage_metadata is None:
         return
     print(f"{prefix} usage_metadata: {usage_metadata}", flush=True)
+
+
+def validate_video_gcs_uri(video_gcs_uri: str) -> None:
+    if not video_gcs_uri:
+        raise ValueError("--video-gcs-uri 是必填参数")
+    if not video_gcs_uri.startswith("gs://"):
+        raise ValueError("--video-gcs-uri 必须是 gs:// 开头的 Cloud Storage 对象地址")
+
+    try:
+        completed = subprocess.run(
+            ["gcloud", "storage", "objects", "describe", video_gcs_uri],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("需要安装 gcloud CLI 才能校验 --video-gcs-uri") from exc
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise FileNotFoundError(
+            f"--video-gcs-uri 不存在、无权限访问或无法读取: {video_gcs_uri}"
+            + (f"\n{detail}" if detail else "")
+        )
+
+
+def build_cache_display_name(video_gcs_uri: str) -> str:
+    digest = hashlib.sha1(video_gcs_uri.encode("utf-8")).hexdigest()[:12]
+    return f"question-selection-{digest}"
+
+
+def create_video_context_cache(
+    client: Any,
+    model_name: str,
+    video_gcs_uri: str,
+    full_transcript_text: str,
+    video_mime_type: str = DEFAULT_VIDEO_MIME_TYPE,
+    cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+) -> str:
+    if not video_gcs_uri.startswith("gs://"):
+        raise ValueError("--video-gcs-uri must be a gs:// Cloud Storage URI")
+
+    print(f"🎞️  创建 question selection 视频 explicit context cache: {video_gcs_uri}", flush=True)
+    cache_display_name = build_cache_display_name(video_gcs_uri)
+    cache = client.caches.create(
+        model=model_name,
+        config=CreateCachedContentConfig(
+            display_name=cache_display_name,
+            ttl=f"{cache_ttl_seconds}s",
+            system_instruction=SELECTION_SYSTEM_PROMPT,
+            contents=[
+                Content(
+                    role="user",
+                    parts=[
+                        Part.from_uri(
+                            file_uri=video_gcs_uri,
+                            mime_type=video_mime_type,
+                        ),
+                        Part.from_text(
+                            text=(
+                                "FULL_VIDEO_TRANSCRIPT:\n"
+                                f"{full_transcript_text}"
+                            ),
+                        ),
+                    ],
+                )
+            ],
+        ),
+    )
+    print(f"🎞️  cache display_name: {cache_display_name}", flush=True)
+    print(f"🎞️  cache name: {cache.name}", flush=True)
+    print_usage_metadata("🎞️  cache", cache.usage_metadata)
+    return cache.name
+
+
+def delete_context_cache(client: Any, cache_name: str) -> None:
+    print(f"🧹 删除 explicit context cache: {cache_name}", flush=True)
+    client.caches.delete(name=cache_name)
 
 
 def log_header(title: str) -> None:
@@ -437,6 +639,25 @@ def looks_like_proper_name(raw_target_text: str, base_form: str) -> bool:
     if not raw_cleaned or not base_form:
         return False
     return raw_cleaned[:1].isupper() and base_form[:1].isupper()
+
+
+def calculate_candidate_score(scores: RefScores | AIContextSelectionScores) -> float:
+    return round(
+        scores.visual_context * CANDIDATE_SCORE_WEIGHTS["visual_context"]
+        + scores.context_clarity * CANDIDATE_SCORE_WEIGHTS["context_clarity"]
+        + scores.learning_value * CANDIDATE_SCORE_WEIGHTS["learning_value"]
+        + scores.question_fit * CANDIDATE_SCORE_WEIGHTS["question_fit"],
+        2,
+    )
+
+
+def default_selection_scores() -> RefScores:
+    return RefScores(
+        visual_context=5,
+        context_clarity=5,
+        learning_value=5,
+        question_fit=5,
+    )
 
 
 def score_candidate(kind: str, pos: str, target_text: str, sentence_text: str) -> int:
@@ -655,6 +876,7 @@ def apply_context_selections(
             raise ValueError(
                 f"unknown sentence_candidate_id for {selection.group_id}: {selection.sentence_candidate_id}"
             )
+        scores = RefScores.model_validate(selection.scores.model_dump())
         selected.append(
             QuestionCandidate(
                 candidate_id=f"c_{len(selected) + 1:06d}",
@@ -672,6 +894,9 @@ def apply_context_selections(
                 token_index=sentence_candidate.token_index,
                 token_explanation=sentence_candidate.token_explanation,
                 score=sentence_candidate.score,
+                scores=scores,
+                candidate_score=calculate_candidate_score(scores),
+                selection_reason=selection.reason,
             )
         )
 
@@ -699,6 +924,7 @@ def extract_question_candidates(
                 {
                     "group_id": group.group_id,
                     "sentence_candidate_id": group.sentence_candidates[0].sentence_candidate_id,
+                    "scores": default_selection_scores().model_dump(),
                     "reason": "legacy auto selection",
                 }
                 for group in groups
@@ -714,25 +940,36 @@ def select_context_groups_with_llm(
     full_transcript_text: str,
     selection_batch_size: int,
     selection_max_workers: int,
+    cached_content_name: str | None = None,
 ) -> AIContextSelectionBatchOutput:
     selections_by_group_id: dict[str, AIContextSelection] = {}
-    llm_groups: list[ContextSelectionGroup] = []
-    for group in groups:
-        if len(group.sentence_candidates) == 1:
+    if selection_llm is None:
+        for group in groups:
             selections_by_group_id[group.group_id] = AIContextSelection(
                 group_id=group.group_id,
                 sentence_candidate_id=group.sentence_candidates[0].sentence_candidate_id,
+                scores=AIContextSelectionScores.model_validate(default_selection_scores().model_dump()),
                 reason="only one sentence candidate",
             )
-        else:
-            llm_groups.append(group)
+        return AIContextSelectionBatchOutput(
+            selections=[selections_by_group_id[group.group_id] for group in groups]
+        )
 
-    if llm_groups and selection_llm is None:
-        raise ValueError("selection_llm is required when a coarse group has multiple sentence candidates")
+    llm_groups = list(groups)
 
     def invoke_batch(batch: list[ContextSelectionGroup]) -> AIContextSelectionBatchOutput:
-        messages = build_context_selection_messages(batch, full_transcript_text)
-        batch_output = selection_llm.invoke_context_selection_batch(messages)
+        messages = build_context_selection_messages(
+            batch,
+            full_transcript_text,
+            include_full_transcript=cached_content_name is None,
+        )
+        try:
+            batch_output = selection_llm.invoke_context_selection_batch(
+                messages,
+                cached_content_name=cached_content_name,
+            )
+        except TypeError:
+            batch_output = selection_llm.invoke_context_selection_batch(messages)
         apply_context_selections(batch, batch_output)
         return batch_output
 
@@ -835,34 +1072,29 @@ def build_ai_messages(
 def build_context_selection_messages(
     groups: list[ContextSelectionGroup],
     full_transcript_text: str,
+    include_full_transcript: bool = True,
 ) -> list[dict[str, str]]:
     batch_payload = {
         "groups": [group.to_selection_payload() for group in groups],
     }
+    content_parts = []
+    if include_full_transcript:
+        content_parts.append(
+            "FULL_VIDEO_TRANSCRIPT:\n"
+            f"{full_transcript_text}"
+        )
+    content_parts.append(
+        "CURRENT_CONTEXT_SELECTION_GROUPS:\n"
+        + json.dumps(batch_payload, ensure_ascii=False, indent=2)
+    )
     return [
         {
             "role": "system",
-            "content": (
-                "你是英语学习题目上下文选择器。"
-                "你必须返回符合结构化 schema 的 selections。"
-                "每个 group 必须选择且只能选择一个最适合生成视频上下文题的句子。"
-                "优先选择目标词或短语在句子里的含义清楚、不是只靠前后文才能猜到的句子。"
-                "优先选择能自然生成中文释义选择题或英文 cloze 选择题的句子："
-                "句子应有足够上下文，目标词和周围搭配关系明确，隐藏目标词后仍能构造唯一合理答案。"
-                "优先选择真实表达完整、语气和场景信息足够的句子。"
-                "不要优先选择纯寒暄、残句、引用不完整、代词指代过重、过短、过长、"
-                "只有语法功能但学习价值低，或目标词在该句里只是人名/数字/噪声的句子。"
-                "如果多个句子都可用，选择最适合让中文读者理解该 coarse unit 核心含义的句子。"
-            ),
+            "content": SELECTION_SYSTEM_PROMPT,
         },
         {
             "role": "user",
-            "content": (
-                "FULL_VIDEO_TRANSCRIPT:\n"
-                f"{full_transcript_text}\n\n"
-                "CURRENT_CONTEXT_SELECTION_GROUPS:\n"
-                + json.dumps(batch_payload, ensure_ascii=False, indent=2)
-            ),
+            "content": "\n\n".join(content_parts),
         },
     ]
 
@@ -937,11 +1169,15 @@ def candidate_resume_key(candidate: QuestionCandidate) -> tuple[int, str]:
 
 
 def candidate_to_payload(candidate: QuestionCandidate) -> dict[str, Any]:
-    return asdict(candidate)
+    payload = asdict(candidate)
+    payload["scores"] = candidate.scores.model_dump()
+    return payload
 
 
 def candidate_from_payload(payload: QuestionCandidatePayload) -> QuestionCandidate:
-    return QuestionCandidate(**payload.model_dump())
+    data = payload.model_dump()
+    data["scores"] = RefScores.model_validate(data["scores"])
+    return QuestionCandidate(**data)
 
 
 def build_candidate_checkpoint(
@@ -949,11 +1185,13 @@ def build_candidate_checkpoint(
     selection_model_name: str,
     selection_top_k: int,
     allowed_question_types: list[str],
+    candidate_score_threshold: float,
 ) -> CandidateCheckpoint:
     return CandidateCheckpoint(
         version=CHECKPOINT_VERSION,
         selection_model=selection_model_name,
         selection_top_k=selection_top_k,
+        candidate_score_threshold=candidate_score_threshold,
         allowed_question_types=list(allowed_question_types),
         candidates=[
             QuestionCandidatePayload.model_validate(candidate_to_payload(candidate))
@@ -962,11 +1200,28 @@ def build_candidate_checkpoint(
     )
 
 
+def build_selected_ref_checkpoint(
+    refs: list[QuestionCandidate],
+    selection_model_name: str,
+    selection_top_k: int,
+    allowed_question_types: list[str],
+    candidate_score_threshold: float,
+) -> CandidateCheckpoint:
+    return build_candidate_checkpoint(
+        candidates=refs,
+        selection_model_name=selection_model_name,
+        selection_top_k=selection_top_k,
+        allowed_question_types=allowed_question_types,
+        candidate_score_threshold=candidate_score_threshold,
+    )
+
+
 def validate_candidate_checkpoint(
     checkpoint: CandidateCheckpoint,
     selection_model_name: str,
     selection_top_k: int,
     allowed_question_types: list[str],
+    candidate_score_threshold: float,
 ) -> None:
     if checkpoint.version != CHECKPOINT_VERSION:
         raise ValueError(f"candidate checkpoint version mismatch: {checkpoint.version}")
@@ -974,6 +1229,10 @@ def validate_candidate_checkpoint(
         raise ValueError(f"candidate checkpoint selection model mismatch: {checkpoint.selection_model}")
     if checkpoint.selection_top_k != selection_top_k:
         raise ValueError(f"candidate checkpoint selection_top_k mismatch: {checkpoint.selection_top_k}")
+    if checkpoint.candidate_score_threshold != candidate_score_threshold:
+        raise ValueError(
+            f"candidate checkpoint candidate_score_threshold mismatch: {checkpoint.candidate_score_threshold}"
+        )
     if checkpoint.allowed_question_types != list(allowed_question_types):
         raise ValueError("candidate checkpoint allowed_question_types mismatch")
 
@@ -986,17 +1245,25 @@ def validate_candidate_checkpoint(
 
 def build_selected_coarse_unit_refs(
     candidate_checkpoint: CandidateCheckpoint,
+    question_reject_reasons: dict[str, str],
 ) -> SelectedCoarseUnitRefs:
     return SelectedCoarseUnitRefs(
         version=candidate_checkpoint.version,
         selection_model=candidate_checkpoint.selection_model,
         selection_top_k=candidate_checkpoint.selection_top_k,
+        candidate_score_threshold=candidate_checkpoint.candidate_score_threshold,
+        score_weights=dict(CANDIDATE_SCORE_WEIGHTS),
         allowed_question_types=list(candidate_checkpoint.allowed_question_types),
         refs=[
             SelectedCoarseUnitRef(
                 coarse_unit_id=candidate.coarse_unit_id,
+                target_text=candidate.target_text,
                 sentence_index=candidate.sentence_index,
                 token_index=candidate.token_index,
+                scores=candidate.scores,
+                candidate_score=candidate.candidate_score,
+                question_reject_reason=question_reject_reasons.get(candidate.candidate_id),
+                selection_reason=candidate.selection_reason,
             )
             for candidate in candidate_checkpoint.candidates
         ],
@@ -1010,7 +1277,15 @@ def load_existing_question_output(
     allowed_question_types: list[str],
     selection_model_name: str,
     selection_top_k: int,
-) -> tuple[list[FinalQuestion], set[str], int, str, CandidateCheckpoint | None]:
+    candidate_score_threshold: float,
+) -> tuple[
+    list[FinalQuestion],
+    set[str],
+    int,
+    str,
+    CandidateCheckpoint | None,
+    dict[tuple[int, str], str],
+]:
     intermediate_path = get_intermediate_output_path(output_path)
 
     source_path: Path | None = None
@@ -1023,7 +1298,7 @@ def load_existing_question_output(
         source_label = "intermediate"
 
     if source_path is None:
-        return [], set(), 0, source_label, None
+        return [], set(), 0, source_label, None, {}
 
     payload = load_json(source_path)
     source = payload.get("source", {})
@@ -1066,9 +1341,31 @@ def load_existing_question_output(
             selection_model_name=selection_model_name,
             selection_top_k=selection_top_k,
             allowed_question_types=allowed_question_types,
+            candidate_score_threshold=candidate_score_threshold,
         )
 
-    return questions, processed_candidate_ids, rejected_count, source_label, checkpoint
+    existing_ref_reject_reasons: dict[tuple[int, str], str] = {}
+    raw_selected_refs = payload.get("selected_coarse_unit_refs", {})
+    if isinstance(raw_selected_refs, dict):
+        raw_refs = raw_selected_refs.get("refs", [])
+        if isinstance(raw_refs, list):
+            for ref in raw_refs:
+                if not isinstance(ref, dict):
+                    continue
+                reason = ref.get("question_reject_reason")
+                coarse_unit_id = ref.get("coarse_unit_id")
+                target_text = ref.get("target_text")
+                if isinstance(reason, str) and reason and isinstance(coarse_unit_id, int) and isinstance(target_text, str):
+                    existing_ref_reject_reasons[(coarse_unit_id, normalize_candidate_key(target_text))] = reason
+
+    return (
+        questions,
+        processed_candidate_ids,
+        rejected_count,
+        source_label,
+        checkpoint,
+        existing_ref_reject_reasons,
+    )
 
 
 class AuditLogger:
@@ -1108,6 +1405,16 @@ def write_question_filter_rejects(audit_logger: AuditLogger, rejects: list[Candi
         )
 
 
+def reject_reason_to_record(candidate: QuestionCandidate, reason: str) -> CandidateReject:
+    return CandidateReject(
+        candidate_id=candidate.candidate_id,
+        sentence_index=candidate.sentence_index,
+        token_index=candidate.token_index,
+        target_text=candidate.target_text,
+        reason=reason,
+    )
+
+
 def write_selection_events(
     audit_logger: AuditLogger,
     selection_output: AIContextSelectionBatchOutput,
@@ -1134,6 +1441,7 @@ def select_question_candidates(
     selection_llm: Any,
     full_transcript_text: str,
     audit_logger: AuditLogger,
+    cached_content_name: str | None = None,
 ) -> tuple[list[QuestionCandidate], list[CandidateReject]]:
     occurrences, hard_rejects = extract_question_occurrences(
         mapped_payload,
@@ -1154,6 +1462,7 @@ def select_question_candidates(
         full_transcript_text=full_transcript_text,
         selection_batch_size=selection_batch_size,
         selection_max_workers=selection_max_workers,
+        cached_content_name=cached_content_name,
     )
     candidates = apply_context_selections(groups, selection_output)
     write_selection_events(audit_logger, selection_output, auto_selected_group_ids)
@@ -1168,30 +1477,24 @@ def select_question_candidates(
     return candidates, hard_rejects
 
 
-def reject_candidate(candidate: QuestionCandidate, reason: str) -> CandidateReject:
-    return CandidateReject(
-        candidate_id=candidate.candidate_id,
-        sentence_index=candidate.sentence_index,
-        token_index=candidate.token_index,
-        target_text=candidate.target_text,
-        reason=reason,
-    )
-
-
 def filter_question_generation_candidates(
     candidates: list[QuestionCandidate],
-) -> tuple[list[QuestionCandidate], list[CandidateReject]]:
+    candidate_score_threshold: float,
+) -> tuple[list[QuestionCandidate], dict[str, str]]:
     eligible: list[QuestionCandidate] = []
-    rejects: list[CandidateReject] = []
+    reject_reasons: dict[str, str] = {}
 
     for candidate in candidates:
         if looks_like_proper_name(candidate.raw_target_text, candidate.base_form):
-            rejects.append(reject_candidate(candidate, "target looks like a proper name"))
+            reject_reasons[candidate.candidate_id] = "专有名词"
+            continue
+        if candidate.candidate_score < candidate_score_threshold:
+            reject_reasons[candidate.candidate_id] = "candidate_score 低于阈值"
             continue
 
         eligible.append(candidate)
 
-    return eligible, rejects
+    return eligible, reject_reasons
 
 
 def validate_batch_candidate_ids(
@@ -1217,11 +1520,16 @@ def run_generation(
     batch_size: int,
     llm: Any,
     model_name: str,
+    gemini_client: Any | None = None,
     selection_llm: Any | None = None,
     selection_model_name: str = DEFAULT_SELECTION_MODEL,
     selection_top_k: int = DEFAULT_SELECTION_TOP_K,
     selection_batch_size: int = DEFAULT_SELECTION_BATCH_SIZE,
     selection_max_workers: int = DEFAULT_SELECTION_MAX_WORKERS,
+    candidate_score_threshold: float = DEFAULT_CANDIDATE_SCORE_THRESHOLD,
+    video_gcs_uri: str | None = None,
+    video_mime_type: str = DEFAULT_VIDEO_MIME_TYPE,
+    cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
 ) -> FinalOutput:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -1231,6 +1539,11 @@ def run_generation(
         raise ValueError("selection_batch_size must be at least 1")
     if selection_max_workers < 1:
         raise ValueError("selection_max_workers must be at least 1")
+    if candidate_score_threshold < 0:
+        raise ValueError("candidate_score_threshold must be non-negative")
+    validate_video_gcs_uri(video_gcs_uri or "")
+    if gemini_client is None:
+        raise ValueError("gemini_client is required when video_gcs_uri is provided")
 
     mapped_payload = load_json(mapped_json)
     full_transcript_text = build_full_transcript_text(mapped_payload)
@@ -1238,7 +1551,14 @@ def run_generation(
     audit_logger = AuditLogger(log_dir / f"{mapped_json.name}.question_audit.jsonl")
     intermediate_output_path = get_intermediate_output_path(output_json)
 
-    existing_questions, processed_candidate_ids, existing_rejected_count, existing_source, candidate_checkpoint = (
+    (
+        existing_questions,
+        processed_candidate_ids,
+        existing_rejected_count,
+        existing_source,
+        candidate_checkpoint,
+        existing_ref_reject_reasons,
+    ) = (
         load_existing_question_output(
             output_json,
             mapped_json=mapped_json,
@@ -1246,34 +1566,62 @@ def run_generation(
             allowed_question_types=allowed_question_types,
             selection_model_name=selection_model_name,
             selection_top_k=selection_top_k,
+            candidate_score_threshold=candidate_score_threshold,
         )
     )
     hard_rejects: list[CandidateReject] = []
+    cached_content_name: str | None = None
+    try:
+        if candidate_checkpoint is None:
+            if video_gcs_uri:
+                cached_content_name = create_video_context_cache(
+                    client=gemini_client,
+                    model_name=selection_model_name,
+                    video_gcs_uri=video_gcs_uri,
+                    full_transcript_text=full_transcript_text,
+                    video_mime_type=video_mime_type,
+                    cache_ttl_seconds=cache_ttl_seconds,
+                )
+            candidates, hard_rejects = select_question_candidates(
+                mapped_payload=mapped_payload,
+                allowed_question_types=allowed_question_types,
+                selection_top_k=selection_top_k,
+                selection_batch_size=selection_batch_size,
+                selection_max_workers=selection_max_workers,
+                selection_llm=selection_llm,
+                full_transcript_text=full_transcript_text,
+                audit_logger=audit_logger,
+                cached_content_name=cached_content_name,
+            )
+            candidate_checkpoint = build_candidate_checkpoint(
+                candidates=candidates,
+                selection_model_name=selection_model_name,
+                selection_top_k=selection_top_k,
+                allowed_question_types=allowed_question_types,
+                candidate_score_threshold=candidate_score_threshold,
+            )
+    finally:
+        if cached_content_name and gemini_client is not None:
+            try:
+                delete_context_cache(gemini_client, cached_content_name)
+            except Exception as exc:
+                print(
+                    f"⚠️  explicit context cache 删除失败: {cached_content_name} | {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
     if candidate_checkpoint is None:
-        candidates, hard_rejects = select_question_candidates(
-            mapped_payload=mapped_payload,
-            allowed_question_types=allowed_question_types,
-            selection_top_k=selection_top_k,
-            selection_batch_size=selection_batch_size,
-            selection_max_workers=selection_max_workers,
-            selection_llm=selection_llm,
-            full_transcript_text=full_transcript_text,
-            audit_logger=audit_logger,
-        )
-        candidate_checkpoint = build_candidate_checkpoint(
-            candidates=candidates,
-            selection_model_name=selection_model_name,
-            selection_top_k=selection_top_k,
-            allowed_question_types=allowed_question_types,
-        )
-    else:
-        validate_candidate_checkpoint(
-            candidate_checkpoint,
-            selection_model_name=selection_model_name,
-            selection_top_k=selection_top_k,
-            allowed_question_types=allowed_question_types,
-        )
-        candidates = [candidate_from_payload(candidate) for candidate in candidate_checkpoint.candidates]
+        raise ValueError("candidate checkpoint was not created")
+
+    validate_candidate_checkpoint(
+        candidate_checkpoint,
+        selection_model_name=selection_model_name,
+        selection_top_k=selection_top_k,
+        allowed_question_types=allowed_question_types,
+        candidate_score_threshold=candidate_score_threshold,
+    )
+    candidates = [candidate_from_payload(candidate) for candidate in candidate_checkpoint.candidates]
+    if existing_source != "none":
         audit_logger.write(
             {
                 "event": "candidate_checkpoint_loaded",
@@ -1282,18 +1630,28 @@ def run_generation(
             }
         )
 
-    eligible_candidates, question_filter_rejects = filter_question_generation_candidates(candidates)
-    new_question_filter_rejects = [
-        reject
-        for reject in question_filter_rejects
-        if reject.candidate_id and reject.candidate_id not in processed_candidate_ids
-    ]
+    question_reject_reasons: dict[str, str] = {}
+    for candidate in candidates:
+        key = (candidate.coarse_unit_id, normalize_candidate_key(candidate.target_text))
+        existing_reason = existing_ref_reject_reasons.get(key)
+        if existing_reason:
+            question_reject_reasons[candidate.candidate_id] = existing_reason
+
+    eligible_candidates, question_filter_reject_reasons = filter_question_generation_candidates(
+        candidates,
+        candidate_score_threshold=candidate_score_threshold,
+    )
+    new_question_filter_rejects = []
+    for candidate_id, reason in question_filter_reject_reasons.items():
+        question_reject_reasons[candidate_id] = reason
+        if candidate_id not in processed_candidate_ids:
+            candidate = next(candidate for candidate in candidates if candidate.candidate_id == candidate_id)
+            new_question_filter_rejects.append(reject_reason_to_record(candidate, reason))
+            processed_candidate_ids.add(candidate_id)
     if new_question_filter_rejects:
         write_question_filter_rejects(audit_logger, new_question_filter_rejects)
-    for reject in new_question_filter_rejects:
-        if reject.candidate_id:
-            processed_candidate_ids.add(reject.candidate_id)
     question_filter_rejection_count = len(new_question_filter_rejects)
+    candidate_filtered_count = len(question_filter_reject_reasons)
 
     atomic_write_json(
         target_path=intermediate_output_path,
@@ -1303,17 +1661,20 @@ def run_generation(
             mapped_json=mapped_json,
             model_name=model_name,
             questions=existing_questions,
-            candidate_count=len(candidates),
+            ref_count=len(candidates),
+            candidate_count=len(eligible_candidates),
+            candidate_filtered_count=candidate_filtered_count,
             rejected_count=existing_rejected_count + question_filter_rejection_count,
             processed_candidate_ids=processed_candidate_ids,
             candidate_checkpoint=candidate_checkpoint,
+            question_reject_reasons=question_reject_reasons,
         ),
     )
 
-    log_step(f"candidate_count: {len(candidates)}")
-    log_step(f"question_candidate_count: {len(eligible_candidates)}")
+    log_step(f"ref_count: {len(candidates)}")
+    log_step(f"candidate_count: {len(eligible_candidates)}")
     log_step(f"hard_filter_reject_count: {len(hard_rejects)}")
-    log_step(f"question_filter_reject_count: {len(question_filter_rejects)}")
+    log_step(f"candidate_filtered_count: {candidate_filtered_count}")
 
     existing_question_keys = {question_resume_key(question) for question in existing_questions}
     remaining_candidates = [
@@ -1350,6 +1711,9 @@ def run_generation(
         for rejection in batch_output.rejections:
             ai_rejection_count += 1
             processed_candidate_ids.add(rejection.candidate_id)
+            question_reject_reasons[rejection.candidate_id] = (
+                f"question generation 阶段主动拒绝：{rejection.reason}"
+            )
             audit_logger.write(
                 {
                     "event": "ai_rejection",
@@ -1363,6 +1727,9 @@ def run_generation(
             if result.question_type not in allowed_question_types:
                 validation_rejection_count += 1
                 processed_candidate_ids.add(result.candidate_id)
+                question_reject_reasons[result.candidate_id] = (
+                    f"question validation 失败：unsupported question_type for this run: {result.question_type}"
+                )
                 audit_logger.write(
                     {
                         "event": "validation_reject",
@@ -1376,6 +1743,7 @@ def run_generation(
             except ValueError as exc:
                 validation_rejection_count += 1
                 processed_candidate_ids.add(result.candidate_id)
+                question_reject_reasons[result.candidate_id] = f"question validation 失败：{exc}"
                 audit_logger.write(
                     {
                         "event": "validation_reject",
@@ -1387,6 +1755,7 @@ def run_generation(
             final_questions.append(final_question)
             existing_question_keys.add(question_resume_key(final_question))
             processed_candidate_ids.add(result.candidate_id)
+            question_reject_reasons.pop(result.candidate_id, None)
             audit_logger.write(
                 {
                     "event": "accepted_question",
@@ -1401,7 +1770,9 @@ def run_generation(
             mapped_json=mapped_json,
             model_name=model_name,
             questions=final_questions,
-            candidate_count=len(candidates),
+            ref_count=len(candidates),
+            candidate_count=len(eligible_candidates),
+            candidate_filtered_count=candidate_filtered_count,
             rejected_count=(
                 existing_rejected_count
                 + question_filter_rejection_count
@@ -1410,6 +1781,7 @@ def run_generation(
             ),
             processed_candidate_ids=processed_candidate_ids,
             candidate_checkpoint=candidate_checkpoint,
+            question_reject_reasons=question_reject_reasons,
         )
         atomic_write_json(
             target_path=intermediate_output_path,
@@ -1422,7 +1794,9 @@ def run_generation(
         mapped_json=mapped_json,
         model_name=model_name,
         questions=final_questions,
-        candidate_count=len(candidates),
+        ref_count=len(candidates),
+        candidate_count=len(eligible_candidates),
+        candidate_filtered_count=candidate_filtered_count,
         rejected_count=(
             existing_rejected_count
             + question_filter_rejection_count
@@ -1430,6 +1804,7 @@ def run_generation(
             + validation_rejection_count
         ),
         candidate_checkpoint=candidate_checkpoint,
+        question_reject_reasons=question_reject_reasons,
     )
 
     atomic_write_json(
@@ -1447,9 +1822,12 @@ def build_final_output(
     mapped_json: Path,
     model_name: str,
     questions: list[FinalQuestion],
+    ref_count: int,
     candidate_count: int,
+    candidate_filtered_count: int,
     rejected_count: int,
     candidate_checkpoint: CandidateCheckpoint,
+    question_reject_reasons: dict[str, str],
 ) -> FinalOutput:
     return FinalOutput(
         source=FinalSource(
@@ -1458,11 +1836,16 @@ def build_final_output(
         ),
         questions=questions,
         audit=FinalAudit(
+            ref_count=ref_count,
             candidate_count=candidate_count,
+            candidate_filtered_count=candidate_filtered_count,
             generated_count=len(questions),
             rejected_count=rejected_count,
         ),
-        selected_coarse_unit_refs=build_selected_coarse_unit_refs(candidate_checkpoint),
+        selected_coarse_unit_refs=build_selected_coarse_unit_refs(
+            candidate_checkpoint,
+            question_reject_reasons=question_reject_reasons,
+        ),
     )
 
 
@@ -1470,18 +1853,24 @@ def build_intermediate_output_payload(
     mapped_json: Path,
     model_name: str,
     questions: list[FinalQuestion],
+    ref_count: int,
     candidate_count: int,
+    candidate_filtered_count: int,
     rejected_count: int,
     processed_candidate_ids: set[str],
     candidate_checkpoint: CandidateCheckpoint,
+    question_reject_reasons: dict[str, str],
 ) -> dict[str, Any]:
     payload = build_final_output(
         mapped_json=mapped_json,
         model_name=model_name,
         questions=questions,
+        ref_count=ref_count,
         candidate_count=candidate_count,
+        candidate_filtered_count=candidate_filtered_count,
         rejected_count=rejected_count,
         candidate_checkpoint=candidate_checkpoint,
+        question_reject_reasons=question_reject_reasons,
     ).model_dump()
     payload["audit"]["processed_candidate_ids"] = sorted(processed_candidate_ids)
     payload["candidate_checkpoint"] = candidate_checkpoint.model_dump()
@@ -1622,6 +2011,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_SELECTION_MAX_WORKERS,
         help=f"Maximum concurrent context-selection AI calls. Default: {DEFAULT_SELECTION_MAX_WORKERS}.",
     )
+    parser.add_argument(
+        "--candidate-score-threshold",
+        type=float,
+        default=DEFAULT_CANDIDATE_SCORE_THRESHOLD,
+        help=f"Minimum weighted ref score to send to question generation. Default: {DEFAULT_CANDIDATE_SCORE_THRESHOLD}.",
+    )
+    parser.add_argument(
+        "--video-gcs-uri",
+        required=True,
+        help="Required gs:// video URI used during context selection.",
+    )
+    parser.add_argument(
+        "--video-mime-type",
+        default=DEFAULT_VIDEO_MIME_TYPE,
+        help=f"Video MIME type for --video-gcs-uri. Default: {DEFAULT_VIDEO_MIME_TYPE}.",
+    )
+    parser.add_argument(
+        "--cache-ttl-seconds",
+        type=int,
+        default=DEFAULT_CACHE_TTL_SECONDS,
+        help=f"Explicit context cache TTL in seconds. Default: {DEFAULT_CACHE_TTL_SECONDS}.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1649,6 +2060,8 @@ def main(argv: list[str] | None = None) -> None:
     log_step(f"selection_top_k: {args.selection_top_k}")
     log_step(f"selection_batch_size: {args.selection_batch_size}")
     log_step(f"selection_max_workers: {args.selection_max_workers}")
+    log_step(f"candidate_score_threshold: {args.candidate_score_threshold}")
+    log_step(f"video_gcs_uri: {args.video_gcs_uri}")
     log_step(f"question_types: {args.question_types}")
     log_step(f"batch_size: {args.batch_size}")
 
@@ -1659,15 +2072,22 @@ def main(argv: list[str] | None = None) -> None:
         batch_size=args.batch_size,
         llm=llm,
         model_name=args.model,
+        gemini_client=gemini_client,
         selection_llm=selection_llm,
         selection_model_name=args.selection_model,
         selection_top_k=args.selection_top_k,
         selection_batch_size=args.selection_batch_size,
         selection_max_workers=args.selection_max_workers,
+        candidate_score_threshold=args.candidate_score_threshold,
+        video_gcs_uri=args.video_gcs_uri,
+        video_mime_type=args.video_mime_type,
+        cache_ttl_seconds=args.cache_ttl_seconds,
     )
 
     log_header("执行完成")
+    log_step(f"ref_count: {final_output.audit.ref_count}")
     log_step(f"candidate_count: {final_output.audit.candidate_count}")
+    log_step(f"candidate_filtered_count: {final_output.audit.candidate_filtered_count}")
     log_step(f"generated_count: {final_output.audit.generated_count}")
     log_step(f"rejected_count: {final_output.audit.rejected_count}")
     log_step(f"output: {args.output_questions_json}")
