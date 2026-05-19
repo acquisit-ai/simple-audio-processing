@@ -2,12 +2,12 @@
 """
 Generate video-context quiz questions from mapped transcript JSON.
 
-This script reads the output produced by `5agent-mapping-deepseek.py`, filters
-mapped semantic tokens globally, asks DeepSeek to submit question content through
-a tool call, then fills stable pre-ingest question metadata in code.
+This script reads mapped transcript JSON, filters mapped semantic tokens
+globally, asks Gemini for strict structured outputs, then fills stable
+pre-ingest question metadata in code.
 
 Usage:
-  python 9question-generation-deepseek.py <mapped_json> <output_questions_json>
+  python 6question-generation-gemini.py <mapped_json> <output_questions_json>
 """
 
 from __future__ import annotations
@@ -17,203 +17,38 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from dotenv import dotenv_values
-from openai import OpenAI
+from dotenv import load_dotenv
+from google import genai
+from google.genai.types import GenerateContentConfig, HttpOptions, ThinkingConfig
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 ROOT_DIR = Path(__file__).resolve().parent
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/beta"
-DEFAULT_QUESTION_MODEL = "deepseek-v4-pro"
-DEFAULT_QUESTION_REASONING_EFFORT = "high"
-DEFAULT_QUESTION_THINKING = {"type": "enabled"}
-DEFAULT_SELECTION_MODEL = "deepseek-v4-flash"
-DEFAULT_SELECTION_REASONING_EFFORT = "high"
-DEFAULT_SELECTION_THINKING = {"type": "enabled"}
+DEFAULT_VERTEX_LOCATION = "global"
+DEFAULT_QUESTION_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_QUESTION_THINKING_LEVEL = "high"
+DEFAULT_SELECTION_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_SELECTION_THINKING_LEVEL = "high"
+ALLOWED_GEMINI_THINKING_LEVELS = {"low", "medium", "high"}
 DEFAULT_SELECTION_TOP_K = 6
 DEFAULT_SELECTION_BATCH_SIZE = 15
 DEFAULT_SELECTION_MAX_WORKERS = 4
 CHECKPOINT_VERSION = 2
 DEFAULT_BATCH_SIZE = 15
-DEFAULT_TOOL_CALL_PARSE_MAX_ATTEMPTS = 3
 SUPPORTED_QUESTION_TYPES = {"context_meaning_choice", "context_cloze_choice"}
 EXPECTED_OPTION_IDS = ["correct", "wrong_1", "wrong_2", "wrong_3"]
-SELECTION_TOOL_NAME = "submit_context_selection_batch"
-QUESTION_TOOL_NAME = "submit_question_batch"
-
-SELECTION_OUTPUT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": SELECTION_TOOL_NAME,
-        "strict": True,
-        "description": "提交每个 coarse group 的最佳上下文句子选择结果。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "selections": {
-                    "type": "array",
-                    "description": "每个输入 group 必须且只能有一个选择结果。",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "group_id": {
-                                "type": "string",
-                                "description": "当前输入 batch 中的 group_id。",
-                            },
-                            "sentence_candidate_id": {
-                                "type": "string",
-                                "description": "当前 group 中被选中的 sentence_candidate_id。",
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "简短说明为什么这个句子最适合出题，只用于审计。",
-                            },
-                        },
-                        "required": ["group_id", "sentence_candidate_id", "reason"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["selections"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-QUESTION_OUTPUT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": QUESTION_TOOL_NAME,
-        "strict": True,
-        "description": (
-            "提交视频上下文题目内容和候选拒绝原因。"
-            "只包含 AI 负责生成的题目内容，不包含数据库元数据。"
-            "不要包含 coarse_id、sentence_index、token_index、start/end、status。"
-            "不要为同一个 candidate 同时提交 result 和 rejection。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "results": {
-                    "type": "array",
-                    "description": "适合出题的 candidate 对应的题目内容；candidate_id 必须来自当前输入 batch。",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "candidate_id": {
-                                "type": "string",
-                                "description": "当前输入 batch 中的 candidate_id。",
-                            },
-                            "question_type": {
-                                "type": "string",
-                                "enum": [
-                                    "context_meaning_choice",
-                                    "context_cloze_choice",
-                                ],
-                                "description": (
-                                    "从 allowed_question_types 中选择的题型。"
-                                    "context_meaning_choice：给出上下文，询问目标词在当前语境中的意思。"
-                                    "context_cloze_choice：把上下文里的目标词隐藏为 ____，不能泄露答案。"
-                                ),
-                            },
-                            "content_payload": {
-                                "type": "object",
-                                "properties": {
-                                    "question": {
-                                        "type": "string",
-                                        "description": "展示给学习者的题目问题文本，必须使用中文。",
-                                    },
-                                    "context_text": {
-                                        "type": "string",
-                                        "description": "展示给学习者的上下文文本；cloze 题的上下文不能泄露答案。",
-                                    },
-                                    "options": {
-                                        "type": "array",
-                                        "description": (
-                                            "必须正好四个选项，顺序固定为 correct、wrong_1、wrong_2、wrong_3。正确选项必须是第一个。"
-                                            "错误选项必须有迷惑性，但不能在当前语境和语法上也成立；如果选项放回原句后语义和语法都自然，它就不是错误选项。"
-                                            "context_meaning_choice 的 options.text 必须使用中文释义。"
-                                            "context_cloze_choice 的 options.text 应使用英文单词或短语。"
-                                        ),
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "id": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                        "correct",
-                                                        "wrong_1",
-                                                        "wrong_2",
-                                                        "wrong_3",
-                                                    ],
-                                                },
-                                                "text": {"type": "string"},
-                                            },
-                                            "required": ["id", "text"],
-                                            "additionalProperties": False,
-                                        },
-                                    },
-                                    "explanation": {
-                                        "type": "string",
-                                        "description": "必须使用中文，只说明正确选项为什么正确，不用说明错误选项为什么错。",
-                                    },
-                                },
-                                "required": [
-                                    "question",
-                                    "context_text",
-                                    "options",
-                                    "explanation",
-                                ],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": [
-                            "candidate_id",
-                            "question_type",
-                            "content_payload",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
-                "rejections": {
-                    "type": "array",
-                    "description": "不适合生成高质量题目的 candidate；candidate_id 必须来自当前输入 batch。",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "candidate_id": {
-                                "type": "string",
-                                "description": "当前输入 batch 中的 candidate_id。",
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": (
-                                    "简短说明为什么该 candidate 不适合出题。"
-                                    "常见原因包括上下文不足、答案太显然、干扰项难以构造。"
-                                ),
-                            },
-                        },
-                        "required": ["candidate_id", "reason"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["results", "rejections"],
-            "additionalProperties": False,
-        },
-    },
-}
 
 QUESTION_SYSTEM_PROMPT = """
 你是英语学习题目生成器。你只根据输入 candidates 生成视频上下文选择题内容。
 
 ROLE AND BOUNDARY:
-- 你只能生成题目内容，必须调用 `submit_question_batch` 工具提交结果，不要额外解释。
+- 你只能生成题目内容，必须返回符合结构化 schema 的 results 和 rejections，不要额外解释。
 - 只根据当前输入 batch 的 candidates 判断是否生成题目。
 - 题目面向中文读者：question 和 explanation 必须使用中文。
 - context_meaning_choice 的 options.text 必须使用中文释义。
@@ -456,54 +291,105 @@ class CandidateReject:
     reason: str
 
 
-class DeepSeekToolCallLLM:
-    def __init__(self, client: Any, model_name: str) -> None:
+class GeminiStructuredLLM:
+    """通过 Vertex AI Gemini 请求 Pydantic schema 约束的结构化输出。"""
+
+    def __init__(
+        self,
+        client: Any,
+        model_name: str,
+        thinking_level: str,
+        schema: type[BaseModel],
+    ) -> None:
+        if thinking_level not in ALLOWED_GEMINI_THINKING_LEVELS:
+            raise ValueError("thinking_level must be one of: low, medium, high")
         self.client = client
         self.model_name = model_name
+        self.thinking_level = thinking_level
+        self.schema = schema
+
+    def invoke(self, messages: list[dict[str, str]]) -> BaseModel:
+        system_instruction, contents = split_gemini_messages(messages)
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=GenerateContentConfig(
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                response_schema=self.schema,
+                thinking_config=ThinkingConfig(
+                    thinking_level=self.thinking_level,
+                ),
+            ),
+        )
+        print_usage_metadata(f"🤖 Gemini {self.model_name}", response.usage_metadata)
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, self.schema):
+            return parsed
+        if isinstance(parsed, BaseModel):
+            return self.schema.model_validate(parsed.model_dump())
+        if isinstance(parsed, dict):
+            return self.schema.model_validate(parsed)
+        content = response.text
+        if not content:
+            raise ValueError("Gemini returned an empty structured response")
+        return self.schema.model_validate_json(content)
+
+
+class GeminiQuestionLLM:
+    def __init__(self, client: Any, model_name: str, thinking_level: str) -> None:
+        self.structured_llm = GeminiStructuredLLM(
+            client=client,
+            model_name=model_name,
+            thinking_level=thinking_level,
+            schema=AIQuestionBatchOutput,
+        )
 
     def invoke_question_batch(self, messages: list[dict[str, str]]) -> AIQuestionBatchOutput:
-        last_error: Exception | None = None
-        for _ in range(DEFAULT_TOOL_CALL_PARSE_MAX_ATTEMPTS):
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                tools=[QUESTION_OUTPUT_TOOL],
-                reasoning_effort=DEFAULT_QUESTION_REASONING_EFFORT,
-                extra_body={"thinking": DEFAULT_QUESTION_THINKING},
-            )
-            try:
-                return parse_llm_tool_call_response(response.choices[0].message)
-            except (TypeError, ValueError, ValidationError) as exc:
-                last_error = exc
-        if last_error is None:
-            raise RuntimeError("DeepSeek question batch returned no parse attempts")
-        raise last_error
+        result = self.structured_llm.invoke(messages)
+        if isinstance(result, AIQuestionBatchOutput):
+            return result
+        return AIQuestionBatchOutput.model_validate(result.model_dump())
 
 
-class DeepSeekContextSelectionLLM:
-    def __init__(self, client: Any, model_name: str) -> None:
-        self.client = client
-        self.model_name = model_name
+class GeminiContextSelectionLLM:
+    def __init__(self, client: Any, model_name: str, thinking_level: str) -> None:
+        self.structured_llm = GeminiStructuredLLM(
+            client=client,
+            model_name=model_name,
+            thinking_level=thinking_level,
+            schema=AIContextSelectionBatchOutput,
+        )
 
     def invoke_context_selection_batch(self, messages: list[dict[str, str]]) -> AIContextSelectionBatchOutput:
-        last_error: Exception | None = None
-        for _ in range(DEFAULT_TOOL_CALL_PARSE_MAX_ATTEMPTS):
-            request_kwargs: dict[str, Any] = {
-                "model": self.model_name,
-                "messages": messages,
-                "tools": [SELECTION_OUTPUT_TOOL],
-                "extra_body": {"thinking": DEFAULT_SELECTION_THINKING},
-            }
-            if DEFAULT_SELECTION_REASONING_EFFORT is not None:
-                request_kwargs["reasoning_effort"] = DEFAULT_SELECTION_REASONING_EFFORT
-            response = self.client.chat.completions.create(**request_kwargs)
-            try:
-                return parse_llm_context_selection_response(response.choices[0].message)
-            except (TypeError, ValueError, ValidationError) as exc:
-                last_error = exc
-        if last_error is None:
-            raise RuntimeError("DeepSeek context selection returned no parse attempts")
-        raise last_error
+        result = self.structured_llm.invoke(messages)
+        if isinstance(result, AIContextSelectionBatchOutput):
+            return result
+        return AIContextSelectionBatchOutput.model_validate(result.model_dump())
+
+
+def split_gemini_messages(messages: list[dict[str, str]]) -> tuple[str | None, str]:
+    system_messages = [
+        message["content"]
+        for message in messages
+        if message.get("role") == "system"
+    ]
+    non_system_messages = [
+        message
+        for message in messages
+        if message.get("role") != "system"
+    ]
+    contents = "\n\n".join(
+        message.get("content", "")
+        for message in non_system_messages
+    )
+    return "\n\n".join(system_messages) or None, contents
+
+
+def print_usage_metadata(prefix: str, usage_metadata: object | None) -> None:
+    if usage_metadata is None:
+        return
+    print(f"{prefix} usage_metadata: {usage_metadata}", flush=True)
 
 
 def log_header(title: str) -> None:
@@ -923,57 +809,6 @@ def merge_ai_result(
     )
 
 
-def read_message_field(value: Any, field_name: str) -> Any:
-    if isinstance(value, dict):
-        return value.get(field_name)
-    return getattr(value, field_name, None)
-
-
-def parse_first_json_object(value: str) -> dict[str, Any]:
-    stripped = value.strip()
-    if not stripped:
-        raise ValueError("DeepSeek tool call arguments are empty")
-    try:
-        payload, _ = json.JSONDecoder().raw_decode(stripped)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"DeepSeek tool call arguments are invalid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("DeepSeek tool call arguments must be a JSON object")
-    return payload
-
-
-def parse_tool_call_arguments(message: Any, expected_tool_name: str) -> dict[str, Any]:
-    tool_calls = read_message_field(message, "tool_calls")
-    if not tool_calls:
-        raise ValueError("DeepSeek did not return tool_calls")
-
-    tool_call = tool_calls[0]
-    function = read_message_field(tool_call, "function")
-    if function is None:
-        raise ValueError("DeepSeek tool call is missing function")
-
-    function_name = read_message_field(function, "name")
-    if function_name != expected_tool_name:
-        raise ValueError(f"DeepSeek called unsupported tool: {function_name}")
-
-    arguments = read_message_field(function, "arguments")
-    if not isinstance(arguments, str):
-        raise TypeError("DeepSeek tool call arguments must be a JSON string")
-
-    payload = parse_first_json_object(arguments)
-    return payload
-
-
-def parse_llm_tool_call_response(message: Any) -> AIQuestionBatchOutput:
-    payload = parse_tool_call_arguments(message, QUESTION_TOOL_NAME)
-    return AIQuestionBatchOutput.model_validate(payload)
-
-
-def parse_llm_context_selection_response(message: Any) -> AIContextSelectionBatchOutput:
-    payload = parse_tool_call_arguments(message, SELECTION_TOOL_NAME)
-    return AIContextSelectionBatchOutput.model_validate(payload)
-
-
 def build_ai_messages(
     candidates: list[QuestionCandidate],
     allowed_question_types: list[str],
@@ -1009,7 +844,7 @@ def build_context_selection_messages(
             "role": "system",
             "content": (
                 "你是英语学习题目上下文选择器。"
-                "你必须调用 submit_context_selection_batch 工具。"
+                "你必须返回符合结构化 schema 的 selections。"
                 "每个 group 必须选择且只能选择一个最适合生成视频上下文题的句子。"
                 "优先选择目标词或短语在句子里的含义清楚、不是只靠前后文才能猜到的句子。"
                 "优先选择能自然生成中文释义选择题或英文 cloze 选择题的句子："
@@ -1653,29 +1488,66 @@ def build_intermediate_output_payload(
     return payload
 
 
-def load_deepseek_config(env_path: Path) -> tuple[str, str]:
-    env_values = dotenv_values(env_path) if env_path.exists() else {}
-    api_key = env_values.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError(f"DEEPSEEK_API_KEY not found in {env_path}")
-    base_url = (
-        env_values.get("DEEPSEEK_BASE_URL")
-        or os.getenv("DEEPSEEK_BASE_URL")
-        or DEFAULT_DEEPSEEK_BASE_URL
+def get_gcloud_project() -> str | None:
+    """读取当前 gcloud project，供未设置 GOOGLE_CLOUD_PROJECT 时使用。"""
+
+    try:
+        completed = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+
+    project = completed.stdout.strip()
+    if completed.returncode != 0 or not project or project == "(unset)":
+        return None
+    return project
+
+
+def create_gemini_client(env_path: Path) -> Any:
+    """创建 Vertex AI Gemini client。认证走 Application Default Credentials。"""
+
+    load_dotenv(env_path)
+    project = (
+        os.getenv("GOOGLE_CLOUD_PROJECT")
+        or os.getenv("GCLOUD_PROJECT")
+        or get_gcloud_project()
     )
-    return api_key, base_url
+    if not project:
+        raise ValueError(
+            "Google Cloud project is required. Set GOOGLE_CLOUD_PROJECT, "
+            "or run: gcloud config set project <PROJECT_ID>"
+        )
+    location = (
+        os.getenv("GOOGLE_CLOUD_LOCATION")
+        or os.getenv("GOOGLE_VERTEX_LOCATION")
+        or DEFAULT_VERTEX_LOCATION
+    )
+    return genai.Client(
+        vertexai=True,
+        project=project,
+        location=location,
+        http_options=HttpOptions(api_version="v1"),
+    )
 
 
-def create_deepseek_tool_call_llm(env_path: Path, model_name: str) -> DeepSeekToolCallLLM:
-    api_key, base_url = load_deepseek_config(env_path)
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    return DeepSeekToolCallLLM(client, model_name)
+def create_gemini_question_llm(
+    client: Any,
+    model_name: str,
+    thinking_level: str,
+) -> GeminiQuestionLLM:
+    return GeminiQuestionLLM(client, model_name, thinking_level.lower())
 
 
-def create_deepseek_context_selection_llm(env_path: Path, model_name: str) -> DeepSeekContextSelectionLLM:
-    api_key, base_url = load_deepseek_config(env_path)
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    return DeepSeekContextSelectionLLM(client, model_name)
+def create_gemini_context_selection_llm(
+    client: Any,
+    model_name: str,
+    thinking_level: str,
+) -> GeminiContextSelectionLLM:
+    return GeminiContextSelectionLLM(client, model_name, thinking_level.lower())
 
 
 def parse_question_types(value: str) -> list[str]:
@@ -1708,17 +1580,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--env-path",
         type=Path,
         default=ROOT_DIR / ".env",
-        help="Path to .env containing DEEPSEEK_API_KEY and optional DEEPSEEK_BASE_URL.",
+        help="Path to .env containing optional GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION.",
     )
     parser.add_argument(
         "--model",
         default=DEFAULT_QUESTION_MODEL,
-        help=f"DeepSeek model for question generation. Default: {DEFAULT_QUESTION_MODEL}.",
+        help=f"Gemini model for question generation. Default: {DEFAULT_QUESTION_MODEL}.",
+    )
+    parser.add_argument(
+        "--question-thinking-level",
+        default=DEFAULT_QUESTION_THINKING_LEVEL,
+        choices=sorted(ALLOWED_GEMINI_THINKING_LEVELS),
+        help=f"Gemini thinking level for question generation. Default: {DEFAULT_QUESTION_THINKING_LEVEL}.",
     )
     parser.add_argument(
         "--selection-model",
         default=DEFAULT_SELECTION_MODEL,
-        help=f"DeepSeek model for context selection. Default: {DEFAULT_SELECTION_MODEL}.",
+        help=f"Gemini model for context selection. Default: {DEFAULT_SELECTION_MODEL}.",
+    )
+    parser.add_argument(
+        "--selection-thinking-level",
+        default=DEFAULT_SELECTION_THINKING_LEVEL,
+        choices=sorted(ALLOWED_GEMINI_THINKING_LEVELS),
+        help=f"Gemini thinking level for context selection. Default: {DEFAULT_SELECTION_THINKING_LEVEL}.",
     )
     parser.add_argument(
         "--selection-top-k",
@@ -1743,14 +1627,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    llm = create_deepseek_tool_call_llm(args.env_path, args.model)
-    selection_llm = create_deepseek_context_selection_llm(args.env_path, args.selection_model)
+    gemini_client = create_gemini_client(args.env_path)
+    llm = create_gemini_question_llm(
+        client=gemini_client,
+        model_name=args.model,
+        thinking_level=args.question_thinking_level,
+    )
+    selection_llm = create_gemini_context_selection_llm(
+        client=gemini_client,
+        model_name=args.selection_model,
+        thinking_level=args.selection_thinking_level,
+    )
 
     log_header("启动题目生成")
     log_step(f"mapped_json: {args.mapped_json}")
     log_step(f"output: {args.output_questions_json}")
     log_step(f"model: {args.model}")
+    log_step(f"question_thinking_level: {args.question_thinking_level}")
     log_step(f"selection_model: {args.selection_model}")
+    log_step(f"selection_thinking_level: {args.selection_thinking_level}")
     log_step(f"selection_top_k: {args.selection_top_k}")
     log_step(f"selection_batch_size: {args.selection_batch_size}")
     log_step(f"selection_max_workers: {args.selection_max_workers}")

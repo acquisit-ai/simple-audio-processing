@@ -44,7 +44,7 @@ DEFAULT_BATCH_SIZE = 3
 DEFAULT_VERTEX_LOCATION = "global"
 DEFAULT_STAGE_ONE_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_STAGE_ONE_THINKING_LEVEL = "high"
-DEFAULT_STAGE_THREE_MODEL = "gemini-3-flash-preview"
+DEFAULT_STAGE_THREE_MODEL = "gemini-3.1-flash-lite-preview"
 DEFAULT_STAGE_THREE_THINKING_LEVEL = "medium"
 ALLOWED_GEMINI_THINKING_LEVELS = {"low", "medium", "high"}
 ROOT_DIR = Path(__file__).resolve().parent
@@ -535,6 +535,20 @@ def dedupe_queries(queries: list[str]) -> list[str]:
     seen: set[str] = set()
     for raw_query in queries:
         query = normalize_whitespace(raw_query.strip())
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        deduped.append(query)
+    return deduped
+
+
+def dedupe_normalized_lookup_queries(queries: list[str]) -> list[str]:
+    """按 lookup 规则清洗并去重自动 exact 查询词。"""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_query in queries:
+        query = normalize_lookup_text(raw_query)
         if not query or query in seen:
             continue
         seen.add(query)
@@ -1130,7 +1144,7 @@ def process_single_token(
 
     # 第一回永远是自动搜索。即使同时查 token.text 和 base_form，
     # 在文档语义里也只算一回搜索。
-    round1_queries = dedupe_queries(
+    round1_queries = dedupe_normalized_lookup_queries(
         [
             str(token_runtime.token.get("text", "")),
             str(token_runtime.token.get("semantic_element", {}).get("base_form", "")),
