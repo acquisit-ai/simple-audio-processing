@@ -3,6 +3,7 @@
 
 import argparse
 import importlib.util
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -18,6 +19,7 @@ DEFAULT_TRANSCRIPT_DIR = Path("2cleaned-data")
 DEFAULT_CLIPPING_PLAN_DIR = Path("3clipped")
 DEFAULT_OUTPUT_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-clips")
 DEFAULT_MAX_WORKERS = 3
+DEFAULT_SKIP_EXISTING = True
 SUPPORTED_VIDEO_SUFFIXES = {
     ".mp4", ".mkv", ".mov", ".avi", ".m4v", ".webm",
     ".MP4", ".MKV", ".MOV", ".AVI", ".M4V", ".WEBM",
@@ -101,6 +103,40 @@ def collect_clip_jobs(
     return jobs, skipped
 
 
+def load_clip_count(clipping_plan_path: Path) -> int:
+    with open(clipping_plan_path, "r", encoding="utf-8") as f:
+        clipping_plan = json.load(f)
+
+    clips = clipping_plan.get("clips", [])
+    if not clips:
+        return 0
+    return len(clips)
+
+
+def has_complete_existing_outputs(
+    *,
+    ffmpeg_clipping_module,
+    video_path: Path,
+    clipping_plan_path: Path,
+    output_dir: Path,
+) -> bool:
+    clip_count = load_clip_count(clipping_plan_path)
+    if clip_count == 0:
+        return False
+
+    for clip_number in range(1, clip_count + 1):
+        clip_name = f"{video_path.stem}-clip{clip_number}"
+        output_video_path = output_dir / f"{clip_name}.mp4"
+        output_transcript_path = output_dir / f"{clip_name}.json"
+        if not ffmpeg_clipping_module.is_valid_existing_clip(
+            output_video_path,
+            output_transcript_path,
+        ):
+            return False
+
+    return True
+
+
 # ==========================================
 # 5. 批量执行主流程
 #    - 对每个已匹配任务直接调用 clip_video_and_transcript
@@ -113,7 +149,7 @@ def run_batch_clipping(
     clipping_plan_dir: Path = DEFAULT_CLIPPING_PLAN_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     max_workers: int = DEFAULT_MAX_WORKERS,
-    skip_existing: bool = False,
+    skip_existing: bool = DEFAULT_SKIP_EXISTING,
 ) -> int:
     if max_workers < 1:
         raise ValueError("max_workers 必须大于等于 1")
@@ -127,7 +163,7 @@ def run_batch_clipping(
     print(f"切片方案目录: {clipping_plan_dir}")
     print(f"输出目录: {output_dir}")
     print(f"视频级并发数: {max_workers}")
-    print(f"跳过已存在 clip: {skip_existing}")
+    print(f"跳过已完整视频: {skip_existing}")
     print(f"可处理视频数: {len(jobs)}")
     print(f"跳过视频数: {len(skipped)}")
 
@@ -170,7 +206,12 @@ def run_batch_clipping(
                     "error": f"{type(exc).__name__}: {exc}",
                 }
 
-            if result["success"]:
+            if result["success"] and result.get("skipped_existing"):
+                print(
+                    f"[{result['task_number']}/{len(jobs)}] 跳过已完整: "
+                    f"{result['video_path'].name}"
+                )
+            elif result["success"]:
                 print(
                     f"[{result['task_number']}/{len(jobs)}] 完成处理: "
                     f"{result['video_path'].name}"
@@ -183,9 +224,17 @@ def run_batch_clipping(
                 )
 
     print("\n批处理完成")
-    print(f"成功: {len(jobs) - len(failed_jobs)}")
+    skipped_existing_count = sum(
+        1
+        for future in future_to_job
+        if future.done()
+        and not future.exception()
+        and future.result().get("skipped_existing")
+    )
+    print(f"成功: {len(jobs) - len(failed_jobs) - skipped_existing_count}")
     print(f"失败: {len(failed_jobs)}")
-    print(f"跳过: {len(skipped)}")
+    print(f"缺输入跳过: {len(skipped)}")
+    print(f"已完整跳过: {skipped_existing_count}")
 
     if failed_jobs:
         print("\n失败列表:")
@@ -207,16 +256,30 @@ def run_single_video_job(
 ) -> dict:
     print(f"[{task_number}/{total_jobs}] 开始处理: {job['video_path'].name}", flush=True)
     try:
+        if skip_existing and has_complete_existing_outputs(
+            ffmpeg_clipping_module=ffmpeg_clipping_module,
+            video_path=job["video_path"],
+            clipping_plan_path=job["clipping_plan_path"],
+            output_dir=output_dir,
+        ):
+            return {
+                "success": True,
+                "skipped_existing": True,
+                "task_number": task_number,
+                "video_path": job["video_path"],
+            }
+
         ffmpeg_clipping_module.clip_video_and_transcript(
             clipping_plan_path=str(job["clipping_plan_path"]),
             video_path=str(job["video_path"]),
             transcript_path=str(job["transcript_path"]),
             output_dir=str(output_dir),
-            skip_existing=skip_existing,
+            skip_existing=False,
         )
     except Exception as exc:
         return {
             "success": False,
+            "skipped_existing": False,
             "task_number": task_number,
             "video_path": job["video_path"],
             "error": f"{type(exc).__name__}: {exc}",
@@ -224,6 +287,7 @@ def run_single_video_job(
 
     return {
         "success": True,
+        "skipped_existing": False,
         "task_number": task_number,
         "video_path": job["video_path"],
     }
@@ -241,7 +305,12 @@ if __name__ == "__main__":
     parser.add_argument("--clipping-plan-dir", default=str(DEFAULT_CLIPPING_PLAN_DIR), help="切片方案目录，默认 3clipped")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="输出目录，默认 /Volumes/Dingzhen/STT/The Office BD-clips")
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS, help="视频级并发数，默认 3")
-    parser.add_argument("--skip-existing", action="store_true", help="跳过已存在且可读取的 clip mp4/json")
+    parser.add_argument(
+        "--skip-existing",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_SKIP_EXISTING,
+        help="跳过已完整的视频任务；用 --no-skip-existing 强制全部重跑",
+    )
     args = parser.parse_args()
 
     exit_code = run_batch_clipping(

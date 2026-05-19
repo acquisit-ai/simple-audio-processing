@@ -1,13 +1,21 @@
 import os
 import json
 import argparse
+import hashlib
 import subprocess
 from pathlib import Path
 from typing import List
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from google import genai
-from google.genai.types import GenerateContentConfig, HttpOptions, ThinkingConfig
+from google.genai.types import (
+    Content,
+    CreateCachedContentConfig,
+    GenerateContentConfig,
+    HttpOptions,
+    Part,
+    ThinkingConfig,
+)
 
 # ==========================================
 # 1. 定义结构化输出数据模型
@@ -15,10 +23,19 @@ from google.genai.types import GenerateContentConfig, HttpOptions, ThinkingConfi
 #    - Clip: 在 ClipBoundary 基础上补齐精确时间和缓冲时间
 #    - LLMClipResponse: 约束模型必须返回 {"clips": [...]} 结构
 # ==========================================
+class EngagementScores(BaseModel):
+    drama: int = Field(ge=1, le=10, description="Conflict, tension, awkwardness, or emotional intensity score from 1 to 10.")
+    humor: int = Field(ge=1, le=10, description="Comedic or funny value score from 1 to 10.")
+    payoff: int = Field(ge=1, le=10, description="Strength of the ending, joke, reversal, or satisfying beat from 1 to 10.")
+    standalone: int = Field(ge=1, le=10, description="How well the clip works without surrounding episode context from 1 to 10.")
+    reasoning: str = Field(description="Brief Simplified Chinese explanation for the engagement scores.")
+
+
 class LLMClip(BaseModel):
     clip_id: int = Field(description="Sequential clip identifier.")
     title: str = Field(description="Short user-facing clip title in Simplified Chinese.")
     description: str = Field(description="Concise user-facing clip description in Simplified Chinese.")
+    engagement: EngagementScores = Field(description="Audience appeal scores for the clip.")
     start_index: int = Field(description="Index of the first sentence in the clip.")
     end_index: int = Field(description="Index of the last sentence in the clip.")
     start_time: int = Field(description="Original start timestamp in milliseconds for the first sentence, used only for self-checking.")
@@ -29,12 +46,14 @@ class Clip(BaseModel):
     clip_id: int = Field(description="Sequential clip identifier.")
     title: str = Field(description="Short user-facing clip title in Simplified Chinese.")
     description: str = Field(description="Concise user-facing clip description in Simplified Chinese.")
+    engagement: EngagementScores = Field(description="Audience appeal scores for the clip.")
     start_index: int = Field(description="Index of the first sentence in the clip.")
     end_index: int = Field(description="Index of the last sentence in the clip.")
     start_time: int = Field(description="Exact start timestamp in milliseconds.")
     end_time: int = Field(description="Exact end timestamp in milliseconds.")
     buffered_start_time: int = Field(description="Buffered clip start timestamp in milliseconds for actual video cutting.")
     buffered_end_time: int = Field(description="Buffered clip end timestamp in milliseconds for actual video cutting.")
+    duration_time: int = Field(description="Buffered clip duration in milliseconds.")
     reasoning: str = Field(description="Brief explanation in Simplified Chinese of why these boundaries were chosen.")
 
 class LLMClipResponse(BaseModel):
@@ -44,12 +63,19 @@ class LLMClipResponse(BaseModel):
 # clip_id：切片的唯一序号
 # title：切片中文标题
 # description：切片中文描述
+# engagement：切片吸引力维度评分
+# engagement.drama：冲突、尴尬或情绪张力评分，1-10
+# engagement.humor：喜剧效果评分，1-10
+# engagement.payoff：笑点、反转、情绪落点或结尾满足感评分，1-10
+# engagement.standalone：脱离上下文后独立观看成立程度评分，1-10
+# engagement.reasoning：吸引力评分的中文解释
 # start_index：切片起始台词的 index
 # end_index：切片结束台词的 index
 # start_time：切片第一句台词的 start 原始毫秒数，仅供模型自查
 # end_time：切片最后一句台词的 end 原始毫秒数，仅供模型自查
 # buffered_start_time：带缓冲的切片起始毫秒数，用于实际视频裁切
 # buffered_end_time：带缓冲的切片结束毫秒数，用于实际视频裁切
+# duration_time：带缓冲的切片时长毫秒数，等于 buffered_end_time - buffered_start_time
 # reasoning：边界取舍原因阐述
 # clips：切片数组
 
@@ -65,6 +91,7 @@ load_dotenv()
 DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_VERTEX_LOCATION = "global"
 DEFAULT_GEMINI_THINKING_LEVEL = "high"
+DEFAULT_CACHE_TTL_SECONDS = 20 * 60
 GEMINI_MODEL = os.getenv("GEMINI_CLIPPING_MODEL", DEFAULT_GEMINI_MODEL)
 GEMINI_THINKING_LEVEL = os.getenv(
     "GEMINI_THINKING_LEVEL",
@@ -76,9 +103,9 @@ VERTEX_LOCATION = (
     or DEFAULT_VERTEX_LOCATION
 )
 
-if GEMINI_THINKING_LEVEL not in {"low", "high"}:
+if GEMINI_THINKING_LEVEL not in {"low", "medium", "high"}:
     raise ValueError(
-        "GEMINI_THINKING_LEVEL must be 'low' or 'high' for Gemini 3 Pro models"
+        "GEMINI_THINKING_LEVEL must be one of: low, medium, high"
     )
 
 
@@ -142,6 +169,46 @@ CLIP_RESPONSE_SCHEMA = {
                         "type": "STRING",
                         "description": "Concise user-facing clip description in Simplified Chinese.",
                     },
+                    "engagement": {
+                        "type": "OBJECT",
+                        "description": "Audience appeal scores for this clip.",
+                        "properties": {
+                            "drama": {
+                                "type": "INTEGER",
+                                "description": "Conflict, tension, awkwardness, or emotional intensity score from 1 to 10.",
+                            },
+                            "humor": {
+                                "type": "INTEGER",
+                                "description": "Comedic or funny value score from 1 to 10.",
+                            },
+                            "payoff": {
+                                "type": "INTEGER",
+                                "description": "Strength of the ending, joke, reversal, or satisfying beat from 1 to 10.",
+                            },
+                            "standalone": {
+                                "type": "INTEGER",
+                                "description": "How well the clip works without surrounding episode context from 1 to 10.",
+                            },
+                            "reasoning": {
+                                "type": "STRING",
+                                "description": "Brief Simplified Chinese explanation for the engagement scores.",
+                            },
+                        },
+                        "required": [
+                            "drama",
+                            "humor",
+                            "payoff",
+                            "standalone",
+                            "reasoning",
+                        ],
+                        "propertyOrdering": [
+                            "drama",
+                            "humor",
+                            "payoff",
+                            "standalone",
+                            "reasoning",
+                        ],
+                    },
                     "start_index": {
                         "type": "INTEGER",
                         "description": "Index of the first sentence in the clip.",
@@ -167,6 +234,7 @@ CLIP_RESPONSE_SCHEMA = {
                     "clip_id",
                     "title",
                     "description",
+                    "engagement",
                     "start_index",
                     "end_index",
                     "start_time",
@@ -177,6 +245,7 @@ CLIP_RESPONSE_SCHEMA = {
                     "clip_id",
                     "title",
                     "description",
+                    "engagement",
                     "start_index",
                     "end_index",
                     "start_time",
@@ -191,23 +260,83 @@ CLIP_RESPONSE_SCHEMA = {
 }
 
 
-def invoke_structured_gemini(prompt: str) -> LLMClipResponse:
+def print_usage_metadata(prefix: str, usage_metadata: object | None) -> None:
+    if usage_metadata is None:
+        return
+    print(f"{prefix} usage_metadata: {usage_metadata}", flush=True)
+
+
+def create_video_context_cache(
+    video_gcs_uri: str,
+    video_mime_type: str = "video/mp4",
+    cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+) -> str:
+    if not video_gcs_uri.startswith("gs://"):
+        raise ValueError("--video-gcs-uri 必须是 gs:// 开头的 Cloud Storage 对象地址")
+
+    print(f"🎞️  创建视频 explicit context cache: {video_gcs_uri}", flush=True)
+    cache_display_name = build_cache_display_name(video_gcs_uri)
+    cache = client.caches.create(
+        model=GEMINI_MODEL,
+        config=CreateCachedContentConfig(
+            display_name=cache_display_name,
+            ttl=f"{cache_ttl_seconds}s",
+            system_instruction=SYSTEM_PROMPT,
+            contents=[
+                Content(
+                    role="user",
+                    parts=[
+                        Part.from_uri(
+                            file_uri=video_gcs_uri,
+                            mime_type=video_mime_type,
+                        )
+                    ],
+                )
+            ],
+        ),
+    )
+    print(f"🎞️  cache display_name: {cache_display_name}", flush=True)
+    print(f"🎞️  cache name: {cache.name}", flush=True)
+    print_usage_metadata("🎞️  cache", cache.usage_metadata)
+    return cache.name
+
+
+def build_cache_display_name(video_gcs_uri: str) -> str:
+    digest = hashlib.sha1(video_gcs_uri.encode("utf-8")).hexdigest()[:12]
+    return f"llm-clipping-{digest}"
+
+
+def delete_context_cache(cache_name: str) -> None:
+    print(f"🧹 删除 explicit context cache: {cache_name}", flush=True)
+    client.caches.delete(name=cache_name)
+
+
+def invoke_structured_gemini(
+    prompt: str,
+    cached_content_name: str | None = None,
+) -> LLMClipResponse:
+    config_kwargs = {
+        "temperature": 0,
+        "candidate_count": 1,
+        "response_mime_type": "application/json",
+        "response_schema": CLIP_RESPONSE_SCHEMA,
+        "thinking_config": ThinkingConfig(
+            thinking_level=GEMINI_THINKING_LEVEL,
+        ),
+    }
+    if cached_content_name:
+        config_kwargs["cached_content"] = cached_content_name
+    else:
+        config_kwargs["system_instruction"] = SYSTEM_PROMPT
+
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        config=GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0,
-            candidate_count=1,
-            response_mime_type="application/json",
-            response_schema=CLIP_RESPONSE_SCHEMA,
-            thinking_config=ThinkingConfig(
-                thinking_level=GEMINI_THINKING_LEVEL,
-            ),
-        ),
+        config=GenerateContentConfig(**config_kwargs),
     )
     if not response.text:
         raise ValueError("Gemini returned an empty response")
+    print_usage_metadata("🤖 Gemini", response.usage_metadata)
     return LLMClipResponse.model_validate_json(response.text)
 
 # 以下参数用于“精确时间 -> 带缓冲时间”的后处理
@@ -226,103 +355,82 @@ DEFAULT_EDGE_RIGHT_BUFFER_MS = 1800
 #    - REFLECTION_PROMPT: 负责第二轮复核，尽量修掉明显边界问题
 # ==========================================
 SYSTEM_PROMPT = """
-You are a semantic clipping engine for video preprocessing. Your only task is to read transcript JSON with millisecond timestamps and divide it into rough clips of about 1 to 3 minutes (about 60,000 to 180,000 ms) for English learning.
+你是一个用于视频预处理的语义切片引擎。你的唯一任务是读取带毫秒级时间戳的 transcript JSON，并把它切成多个约 1 到 3 分钟（约 60,000 到 180,000 毫秒）的粗切片，供英语学习使用。
 
-# Core goals
-1. Semantic closure first: each clip should feel as self-contained as possible and should not feel obviously context-dependent when watched alone.
-2. Limited overlap is allowed if it helps preserve closure, but avoid excessive repetition between adjacent clips.
-3. Linguistic continuity first: do not cut inside a complete sentence, a tight question-answer exchange, or a strongly connected expression chain.
-4. Natural openings: avoid starting a clip with a pronoun, conjunction, or fragment that clearly depends on previous context.
-5. Duration is a secondary constraint: if duration and semantic integrity conflict, prefer semantic integrity and then stay as close as possible to 3 minutes.
-6. Leave-gap cleanup: you may drop segments with very low English-learning value, such as stretches with no useful expressions, phrases, or collocations. Large timeline gaps are acceptable when justified.
-
-# Segmentation cues (soft guidance)
-- Split according to content naturally, keep overall clip count reasonable, and preferably keep the total number of clips within about 12 when possible.
-- Prefer cuts around scene changes, topic changes, longer pauses, the end of a question-answer turn, or after an action/joke payoff is completed.
-- Do not split setup from payoff, question from answer, or suggestion from response across two clips unless necessary.
-- By default, try to cover most dialogue with learning value; only drop segments that are clearly low-value, repetitive small talk, or too context-dependent to stand alone.
-
-# English-learning preference (soft guidance)
-- Without harming semantic closure, prefer segments containing frequent spoken English, natural question-answering, collocations, phrasal verbs, idioms, emotional expressions, and workplace or everyday expressions.
-- If two boundary choices are equally natural, prefer the one that is better for shadowing, retelling, or standalone study.
-
-# Output requirements
-Output clip boundaries together with corresponding timestamps:
-- title: short user-facing title in Simplified Chinese
-- description: concise user-facing description in Simplified Chinese
-- start_index: index of the first sentence in the clip
-- end_index: index of the last sentence in the clip
-- start_time: original start timestamp in milliseconds for the first sentence
-- end_time: original end timestamp in milliseconds for the last sentence
-- reasoning: short explanation of the boundary choice in Simplified Chinese
-
-All title, description, and reasoning values must be written in Simplified Chinese.
-"""
-
-# SYSTEM_PROMPT 中文对照
-# 你是一个负责视频流预处理的“语义切片引擎”。你的唯一任务是读取带有毫秒级时间戳的 JSON 台词文本，
-# 将其划分为多个 1 到 3 分钟（约 60,000 - 180,000 毫秒）的粗略区块，专供英语学习使用。
-#
 # 核心目标
-# 1. 语义闭环优先：每个切片应尽量自洽，单独观看时不明显悬空。
-# 2. 适度重叠以保闭环：相邻切片之间允许有部分时间段重叠，但严禁重叠过多导致学习重复。
-# 3. 语言连贯优先：不要在完整句子、紧凑问答或强依赖上下文的表达链条中间切断。
-# 4. 起点自然：避免让切片以明显承接上文的代词、连词或残句开头。
-# 5. 时长是次级约束：若无法同时满足时长和语义完整，优先保证语义完整，再尽量靠近 3 分钟。
-# 6. 留白清洗：丢弃语言学习价值极低的片段，例如没有有价值的词组搭配、短语或表达。允许大段时间轴留白。
-#
-# 切分线索（软建议）
-# - 根据内容合理切分，控制长短，总数量最好控制在 12 个及以内。
-# - 优先在场景切换、话题切换、较长停顿、问答回合结束、动作/笑点完成后切分。
-# - 不要把 setup 和 payoff、提问和回答、建议和回应拆到两个切片里。
-# - 默认尽量覆盖大部分有学习价值的对白；在片段明显低价值、重复寒暄或强依赖前文且难以独立成立时舍弃。
-#
-# 英语学习导向（软建议）
-# - 在不破坏语义闭环的前提下，可优先保留包含高频口语、自然问答、固定搭配、短语动词、习语、情绪表达、职场/日常场景表达的片段。
-# - 如果两个切法都同样自然，可优先选择更适合跟读、复述、单独学习的方案。
-#
+1. 语义闭环优先：每个切片应尽量自洽，单独观看时不明显悬空。
+2. 允许少量重叠来保留语义闭环，但不要让相邻切片重复过多。
+3. 语言连贯优先：不要切断完整句子、紧密问答、强依赖上下文的表达链条。
+4. 起点自然：避免让切片以明显承接上文的代词、连词或残句开头。
+5. 时长是次级约束：如果时长和语义完整冲突，优先保证语义完整，再尽量靠近 3 分钟。
+6. 可清理低价值留白：可以丢弃英语学习价值很低的片段，例如没有有价值表达、短语或搭配的内容。允许合理的大段时间轴留白。
+
+# 切分线索
+- 按内容自然切分，控制总数量；如果可行，尽量把 clips 总数控制在 12 个以内。
+- 优先在场景变化、话题变化、较长停顿、问答回合结束、动作或笑点完成后切分。
+- 不要把铺垫和笑点、问题和回答、建议和回应拆到两个切片里，除非没有更好的选择。
+- 默认尽量覆盖大多数有学习价值的对白；只丢弃明显低价值、重复寒暄或过度依赖上下文且难以独立成立的片段。
+
+# 英语学习偏好
+- 在不破坏语义闭环的前提下，优先保留包含高频口语、自然问答、固定搭配、短语动词、习语、情绪表达、职场或日常表达的片段。
+- 如果两个边界选择同样自然，优先选择更适合跟读、复述或单独学习的方案。
+
+# 可选视频上下文
+- 如果提供了视频，只把视频作为判断语义闭环、场景变化、情绪转折、标题和描述的辅助上下文。
+- transcript 的句子 index 是唯一权威来源。
+- transcript 的时间戳是唯一权威来源。
+- 视频绝不能作为 start_time 或 end_time 的来源。
+- 不要从视频中发明新的时间戳或句子 index。
+- 每个 clip 的 start_index 和 end_index 必须来自输入 transcript JSON 中实际存在的句子 index。
+- 每个 clip 的 start_time 必须严格等于 transcript.sentences[start_index].start。
+- 每个 clip 的 end_time 必须严格等于 transcript.sentences[end_index].end。
+
 # 输出要求
-# 输出切片边界与对应时间：
-# - title：面向用户展示的简短中文标题
-# - description：面向用户展示的简短中文描述
-# - start_index：切片第一句台词的 index
-# - end_index：切片最后一句台词的 index
-# - start_time：切片第一句台词对应的 start 原始毫秒数
-# - end_time：切片最后一句台词对应的 end 原始毫秒数
-# - reasoning：中文边界取舍原因阐述
-#
-# title、description、reasoning 必须全部使用简体中文。
+输出切片边界和辅助信息：
+- title：面向用户展示的简短中文标题
+- description：面向用户展示的简短中文描述
+- engagement：吸引力维度评分对象
+  - drama：1 到 10 的整数；冲突、尴尬或情绪张力
+  - humor：1 到 10 的整数；喜剧或好笑程度
+  - payoff：1 到 10 的整数；结尾、笑点、反转或情绪落点的强度
+  - standalone：1 到 10 的整数；脱离前后剧情后独立观看是否成立
+  - reasoning：用简体中文简短解释这些吸引力评分
+- start_index：切片第一句台词的 index
+- end_index：切片最后一句台词的 index
+- start_time：切片第一句台词在 transcript 中的原始 start 毫秒数
+- end_time：切片最后一句台词在 transcript 中的原始 end 毫秒数
+- reasoning：用简体中文简短解释边界选择原因
+
+# 吸引力评分校准
+- 1-3：较弱，独立观看价值低，偏填充或过度依赖上下文。
+- 4-6：可用，但吸引力中等。
+- 7-8：较强，有明确观看吸引力。
+- 9-10：优秀；只给明显非常好笑、有张力、记忆点强或结尾满足感很强的片段。
+
+所有 title、description、reasoning、engagement.reasoning 都必须使用简体中文。
+不要虚高 engagement 分数；评分应相对于同一个 transcript 里的其他 clips 做校准。
+"""
 
 REFLECTION_PROMPT = """
-Act as a strict quality reviewer and re-check your previous clipping plan.
+请作为严格质检员，重新检查上一轮切片方案。
 
-Review checklist:
-1. Does any clip start with an obviously dangling pronoun or context-dependent opening?
-2. Does any clip duration clearly deviate too far from the 60,000-180,000 ms target range?
-3. Did you incorrectly cut inside a tight question-answer exchange or another strongly linked dialogue unit?
-4. Were you overly conservative and therefore skipped too much dialogue that still has learning value?
-5. Is there unnecessary heavy overlap between adjacent clips?
-6. Is there a better boundary choice that would preserve more complete everyday expressions, question-answer chains, or collocations for learning?
-7. Are title, description, and reasoning all written in Simplified Chinese and aligned with the final clip boundaries?
+检查清单：
+1. 是否有 clip 以明显悬空的代词、连词或依赖前文的开头开始？
+2. 是否有 clip 时长严重偏离 60,000 到 180,000 毫秒的目标范围？
+3. 是否错误切断了紧密问答、铺垫和笑点、建议和回应，或其他强关联对白单元？
+4. 是否过度保守，遗漏了仍有英语学习价值的对白？
+5. 相邻 clips 之间是否存在不必要的大量重叠？
+6. 是否有更好的边界，可以保留更完整的日常表达、问答链条或固定搭配？
+7. title、description、reasoning 是否都使用简体中文，并且与最终 clip 边界一致？
+8. engagement 分数是否校准合理、没有虚高，并且与最终 clip 边界一致？
+9. start_index 和 end_index 是否都来自 transcript 中实际存在的句子 index？
+10. start_time 是否严格等于 transcript.sentences[start_index].start？
+11. end_time 是否严格等于 transcript.sentences[end_index].end？
+12. 是否错误地把视频时间轴或视频推断结果当成 transcript 时间戳使用？
 
-If you find issues, fix them and output the full corrected result object in the same format: {"clips": [...]}.
-If the plan is already solid, output the previous full result object unchanged, still in the format: {"clips": [...]}.
+如果发现问题，请修正并输出完整修正后的结果对象，格式仍然必须是 {"clips": [...]}。
+如果方案已经可靠，请原样输出上一轮完整结果对象，格式仍然必须是 {"clips": [...]}。
 """
-
-# REFLECTION_PROMPT 中文对照
-# 请作为严格的质检员，重新审视你刚才输出的切片方案。
-#
-# 审查重点：
-# 1. 是否有明显的“首句代词悬空”导致语境断裂？
-# 2. 是否有切片的时间跨度严重偏离 60,000 - 180,000 毫秒的约束？
-# 3. 是否错误切断了紧凑的问答回合？
-# 4. 是否因为过度保守而遗漏了大量本可学习的对白？
-# 5. 是否有不必要的大量重叠？
-# 6. 是否有更适合学习的边界选择，可以保留更完整的常用表达、问答链条或固定搭配？
-# 7. title、description、reasoning 是否全部使用简体中文，并且与最终切片边界一致？
-#
-# 如果发现缺陷，请修正并输出优化后的完整结果对象，格式必须仍然是 {"clips": [...]}。
-# 如果逻辑已经闭环，无需优化，请直接原样输出之前的完整结果对象，格式必须仍然是 {"clips": [...]}。
 
 
 # ==========================================
@@ -482,12 +590,14 @@ def add_timestamps_to_clips(clips: List[LLMClip], transcript_data: dict) -> List
                 clip_id=clip.clip_id,
                 title=clip.title,
                 description=clip.description,
+                engagement=clip.engagement,
                 start_index=clip.start_index,
                 end_index=clip.end_index,
                 start_time=start_sentence["start"],
                 end_time=end_sentence["end"],
                 buffered_start_time=buffered_start_time,
                 buffered_end_time=buffered_end_time,
+                duration_time=buffered_end_time - buffered_start_time,
                 reasoning=clip.reasoning,
             )
         )
@@ -570,6 +680,60 @@ def validate_clip_boundaries(clips: List[LLMClip], transcript_data: dict) -> Non
         previous_start_index = clip.start_index
         previous_end_index = clip.end_index
 
+
+def get_index_constraint_text(transcript_data: dict) -> str:
+    sentences = transcript_data.get("sentences", [])
+    if not sentences:
+        raise ValueError("transcript_data.sentences 为空，无法生成 index 约束")
+
+    indexes = [sentence["index"] for sentence in sentences]
+    return (
+        "# Transcript index constraints\n"
+        f"- valid_min_index: {min(indexes)}\n"
+        f"- valid_max_index: {max(indexes)}\n"
+        f"- valid_index_count: {len(indexes)}\n"
+        "- start_index and end_index must be existing sentence indexes from the provided transcript JSON.\n"
+        "- Never output an index smaller than valid_min_index or larger than valid_max_index.\n"
+        "- Never infer extra sentence indexes from the video.\n"
+    )
+
+
+def validate_or_repair_clip_boundaries(
+    response_obj: LLMClipResponse,
+    transcript_data: dict,
+    transcript_text: str,
+    index_constraint_text: str,
+    cached_content_name: str | None = None,
+) -> LLMClipResponse:
+    try:
+        validate_clip_boundaries(response_obj.clips, transcript_data)
+        return response_obj
+    except ValueError as exc:
+        validation_error = str(exc)
+        print(f"⚠️  切片边界校验失败，执行一次自动修复: {validation_error}", flush=True)
+
+    repair_prompt = (
+        "上一轮切片结果没有通过代码侧确定性校验。\n"
+        "请修复完整 JSON 结果，使它符合要求的 schema 和所有 transcript index 约束。\n"
+        "不得从视频中发明句子 index。\n"
+        "不得把视频时间轴或视频推断结果当成 transcript 时间戳使用。\n"
+        "如果某个边界超出 transcript 范围，请选择语义上最接近且实际存在的 transcript 句子 index，并同步更新 title、description、engagement、start_time、end_time 和 reasoning，使它们与修正后的边界一致。\n\n"
+        f"{index_constraint_text}\n"
+        "校验错误：\n"
+        f"{validation_error}\n\n"
+        "上一轮无效切片结果：\n"
+        f"{response_obj.model_dump_json(indent=2, ensure_ascii=False)}\n\n"
+        "Transcript JSON：\n"
+        f"{transcript_text}"
+    )
+
+    repaired_response_obj = invoke_structured_gemini(
+        repair_prompt,
+        cached_content_name=cached_content_name,
+    )
+    validate_clip_boundaries(repaired_response_obj.clips, transcript_data)
+    return repaired_response_obj
+
 # ==========================================
 # 9. 主执行管线
 #    步骤概览：
@@ -581,7 +745,13 @@ def validate_clip_boundaries(clips: List[LLMClip], transcript_data: dict) -> Non
 #    6) 回填精确时间与缓冲时间
 #    7) 输出到默认 3clipped/ 或用户指定路径
 # ==========================================
-def process_transcript_pipeline(input_filepath: str, output_filepath: str | None = None):
+def process_transcript_pipeline(
+    input_filepath: str,
+    output_filepath: str | None = None,
+    video_gcs_uri: str | None = None,
+    video_mime_type: str = "video/mp4",
+    cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+):
     input_path = Path(input_filepath)
     
     # 步骤 1：读取原始 transcript JSON
@@ -594,57 +764,90 @@ def process_transcript_pipeline(input_filepath: str, output_filepath: str | None
     # 步骤 2：删除 tokens，避免把词级信息和额外噪音送给大模型
     cleaned_transcript_data = remove_tokens_from_transcript(transcript_data)
     transcript_text = json.dumps(cleaned_transcript_data, ensure_ascii=False)
-    
-    # 步骤 3：第一轮切片
-    # 让模型同时输出边界与辅助时间，便于其自查时长和闭环性
-    print("🚀 [1/3] 执行初次切片生成...")
-    initial_prompt = (
-        "Please perform semantic clipping on the following transcript:\n"
-        f"{transcript_text}"
-    )
+    index_constraint_text = get_index_constraint_text(transcript_data)
 
-    initial_response_obj = invoke_structured_gemini(initial_prompt)
+    cached_content_name = None
+    if video_gcs_uri:
+        cached_content_name = create_video_context_cache(
+            video_gcs_uri=video_gcs_uri,
+            video_mime_type=video_mime_type,
+            cache_ttl_seconds=cache_ttl_seconds,
+        )
     
-    # 步骤 4：第二轮反思优化
-    # 把第一次结果回灌给模型，让模型自查边界质量
-    print("🔍 [2/3] 执行自我反思与优化...")
-    ai_memory_str = initial_response_obj.model_dump_json(indent=2, ensure_ascii=False)
-    
-    reflection_prompt = (
-        "Previous clipping plan:\n"
-        f"{ai_memory_str}\n\n"
-        f"{REFLECTION_PROMPT}"
-    )
+    try:
+        # 步骤 3：第一轮切片
+        # 让模型同时输出边界与辅助时间，便于其自查时长和闭环性
+        print("🚀 [1/3] 执行初次切片生成...")
+        initial_prompt = (
+            f"{index_constraint_text}\n"
+            "Please perform semantic clipping on the following transcript:\n"
+            f"{transcript_text}"
+        )
 
-    # 再次调用，得到最终的边界结果
-    final_response_obj = invoke_structured_gemini(reflection_prompt)
-
-    # 步骤 5：先校验边界是否合法，再做时间回填
-    # 注意：即便模型给出的 start_time / end_time 有偏差，最终仍以 transcript 为准
-    validate_clip_boundaries(final_response_obj.clips, transcript_data)
-
-    # 步骤 6：根据原始 transcript 回填精确时间和带缓冲时间
-    final_clips = add_timestamps_to_clips(final_response_obj.clips, transcript_data)
-    
-    # 步骤 7：确定输出路径并写入结果
-    print("💾 [3/3] 正在落盘保存...")
-    if output_filepath is None:
-        output_path = Path("3clipped") / input_path.name
-    else:
-        output_path = Path(output_filepath)
-
-    # 确保目标目录存在，再输出最终 JSON
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(
-            {"clips": [clip.model_dump() for clip in final_clips]},
-            f,
-            indent=4,
-            ensure_ascii=False,
+        initial_response_obj = invoke_structured_gemini(
+            initial_prompt,
+            cached_content_name=cached_content_name,
         )
         
-    print(f"✅ 任务完成！文件已保存至: {output_path}")
+        # 步骤 4：第二轮反思优化
+        # 把第一次结果回灌给模型，让模型自查边界质量
+        print("🔍 [2/3] 执行自我反思与优化...")
+        ai_memory_str = initial_response_obj.model_dump_json(indent=2, ensure_ascii=False)
+        
+        reflection_prompt = (
+            f"{index_constraint_text}\n"
+            "Previous clipping plan:\n"
+            f"{ai_memory_str}\n\n"
+            f"{REFLECTION_PROMPT}"
+        )
+
+        # 再次调用，得到最终的边界结果
+        final_response_obj = invoke_structured_gemini(
+            reflection_prompt,
+            cached_content_name=cached_content_name,
+        )
+
+        # 步骤 5：先校验边界是否合法，再做时间回填
+        # 注意：即便模型给出的 start_time / end_time 有偏差，最终仍以 transcript 为准
+        final_response_obj = validate_or_repair_clip_boundaries(
+            response_obj=final_response_obj,
+            transcript_data=transcript_data,
+            transcript_text=transcript_text,
+            index_constraint_text=index_constraint_text,
+            cached_content_name=cached_content_name,
+        )
+
+        # 步骤 6：根据原始 transcript 回填精确时间和带缓冲时间
+        final_clips = add_timestamps_to_clips(final_response_obj.clips, transcript_data)
+        
+        # 步骤 7：确定输出路径并写入结果
+        print("💾 [3/3] 正在落盘保存...")
+        if output_filepath is None:
+            output_path = Path("3clipped") / input_path.name
+        else:
+            output_path = Path(output_filepath)
+
+        # 确保目标目录存在，再输出最终 JSON
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(
+                {"clips": [clip.model_dump() for clip in final_clips]},
+                f,
+                indent=4,
+                ensure_ascii=False,
+            )
+            
+        print(f"✅ 任务完成！文件已保存至: {output_path}")
+    finally:
+        if cached_content_name:
+            try:
+                delete_context_cache(cached_content_name)
+            except Exception as exc:
+                print(
+                    f"⚠️  explicit context cache 删除失败: {cached_content_name} | {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
 
 # ==========================================
 # 10. 命令行入口
@@ -661,6 +864,28 @@ if __name__ == "__main__":
         default=None,
         help="输出 JSON 文件路径，默认写入 3clipped/ 下并保持同名",
     )
+    parser.add_argument(
+        "--video-gcs-uri",
+        default=None,
+        help="可选：GCS 视频对象地址，例如 gs://bucket/path/video.mp4；提供后会创建 explicit context cache 并作为多模态上下文",
+    )
+    parser.add_argument(
+        "--video-mime-type",
+        default="video/mp4",
+        help="可选：视频 MIME type，默认 video/mp4",
+    )
+    parser.add_argument(
+        "--cache-ttl-seconds",
+        type=int,
+        default=DEFAULT_CACHE_TTL_SECONDS,
+        help="可选：explicit context cache TTL 秒数，默认 1200 秒（20 分钟）",
+    )
     args = parser.parse_args()
 
-    process_transcript_pipeline(args.input, args.output)
+    process_transcript_pipeline(
+        args.input,
+        args.output,
+        video_gcs_uri=args.video_gcs_uri,
+        video_mime_type=args.video_mime_type,
+        cache_ttl_seconds=args.cache_ttl_seconds,
+    )

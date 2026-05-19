@@ -37,6 +37,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from direct_no_match_baseforms import DIRECT_NO_MATCH_BASEFORMS
+
 
 DEFAULT_BATCH_SIZE = 3
 DEFAULT_STAGE_ONE_MODEL = "gpt-5.4-mini"
@@ -45,42 +47,6 @@ DEFAULT_STAGE_THREE_MODEL = "gpt-5.4-nano"
 DEFAULT_STAGE_THREE_REASONING_EFFORT = "high"
 ROOT_DIR = Path(__file__).resolve().parent
 QUERY_SCRIPT_PATH = ROOT_DIR / "supabase" / "query_coarse_units.py"
-DIRECT_NO_MATCH_BASEFORMS = {
-    "a", "an", "the",
-    "and", "or", "but", "if",
-    "as", "than", "that", "which", "who", "whom", "whose",
-    "is", "am", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did", "done", "doing",
-    "have", "has", "had", "having",
-    "can", "could", "may", "must",
-    "not", "no", "yes",
-    "he", "his", "him",
-    "she", "her", "hers",
-    "they", "their", "theirs", "them",
-    "we", "our", "ours", "us",
-    "you", "your", "yours",
-    "it", "its",
-    "i", "me", "my", "mine",
-    "this", "these", "that", "those",
-    "there", "here",
-    "of", "to", "in", "on", "at", "for", "with", "from", "by",
-    "up", "down", "out", "off",
-    "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves",
-    "please",
-    "sorry",
-    "thanks", "thank", "thank you",
-    "bye", "goodbye",
-    "hello", "hi",
-    "nah", "nope",
-    "ha", "haha", "hahaha",
-    "yeah", "yep", "yup",
-    "ok", "okay", "alright", "all right",
-    "oh", "ooh", "ah", "uh", "um", "uhh", "umm", "hm", "hmm", "huh", "uh-huh",
-    "wow", "whoa", "oops",
-    "mm", "mmm", "mhm", "mm-hmm",
-    "er", "erm",
-    "hey",
-}
 DIRECT_NO_MATCH_REASON = (
     "当前 token 属于过于简单、极高频、低学习价值的基础功能词、代词或口语填充词，"
     "不进入 coarse_unit 映射，直接按 no_match 处理。"
@@ -1354,10 +1320,18 @@ def attach_timing_info(
     return timed_sentences
 
 
-def create_final_payload(sentences: list[dict[str, Any]]) -> dict[str, Any]:
-    """把累计句子列表包装成最终输出 JSON 结构。"""
+def create_final_payload(
+    sentences: list[dict[str, Any]],
+    source_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """把累计句子列表包装成最终输出 JSON 结构，并保留输入顶层元数据。"""
 
-    return {"sentences": sentences}
+    payload: dict[str, Any] = {"sentences": sentences}
+    if source_payload:
+        for key, value in source_payload.items():
+            if key != "sentences":
+                payload[key] = value
+    return payload
 
 
 def main() -> None:
@@ -1460,7 +1434,7 @@ def main() -> None:
             target_path=intermediate_output_path,
             temp_dir=temp_dir,
             input_path=args.input_json,
-            payload=create_final_payload(accumulated_sentences),
+            payload=create_final_payload(accumulated_sentences, input_payload),
         )
 
         log_step(
@@ -1476,7 +1450,7 @@ def main() -> None:
         )
 
     timed_sentences = attach_timing_info(input_sentences, accumulated_sentences)
-    final_payload = create_final_payload(timed_sentences)
+    final_payload = create_final_payload(timed_sentences, input_payload)
     atomic_write_json(
         target_path=args.output_json,
         temp_dir=args.output_json.parent,

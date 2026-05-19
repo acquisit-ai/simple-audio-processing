@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-批量调用 5agent-mapping-deepseek.py 处理 transcript JSON。
+批量调用 5agent-mapping-gemini.py 处理 transcript JSON。
 
 默认行为：
 - 从 `resource/The Office BD/clips-transcripts` 读取源 JSON
 - 输出到 `resource/The Office BD/mapped`
 - 最多开启 5 个并发任务
 - 如果目标目录已存在同名文件，则直接跳过
-- 屏蔽子进程 `5agent-mapping-deepseek.py` 的命令行输出
+- 屏蔽子进程 `5agent-mapping-gemini.py` 的命令行输出
 """
 
 from __future__ import annotations
@@ -24,11 +24,11 @@ DEFAULT_SOURCE_DIR = Path("resource/The Office BD/clips-transcripts")
 DEFAULT_TARGET_DIR = Path("resource/The Office BD/mapped")
 DEFAULT_MAX_WORKERS = 5
 ROOT_DIR = Path(__file__).resolve().parent
-MAPPING_SCRIPT = ROOT_DIR / "5agent-mapping-deepseek.py"
+MAPPING_SCRIPT = ROOT_DIR / "5agent-mapping-gemini.py"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch run 5agent-mapping-deepseek.py over transcript JSON files.")
+    parser = argparse.ArgumentParser(description="Batch run 5agent-mapping-gemini.py over transcript JSON files.")
     parser.add_argument(
         "--source-dir",
         type=Path,
@@ -71,7 +71,7 @@ def collect_source_files(source_dir: Path) -> list[Path]:
 
 def run_single_file(source_path: Path, target_path: Path) -> tuple[bool, str]:
     """
-    调用 5agent-mapping-deepseek.py 处理单个文件。
+    调用 5agent-mapping-gemini.py 处理单个文件。
 
     返回：
     - success: 是否成功

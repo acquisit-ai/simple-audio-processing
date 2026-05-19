@@ -27,6 +27,8 @@ from dotenv import dotenv_values
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from direct_no_match_baseforms import DIRECT_NO_MATCH_BASEFORMS
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/beta"
@@ -210,42 +212,6 @@ QUESTION_OUTPUT_TOOL = {
     },
 }
 
-DIRECT_NO_MATCH_BASEFORMS = {
-    "a", "an", "the",
-    "and", "or", "but", "if",
-    "as", "than", "that", "which", "who", "whom", "whose",
-    "is", "am", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did", "done", "doing",
-    "have", "has", "had", "having",
-    "can", "could", "may", "must",
-    "not", "no", "yes",
-    "he", "his", "him",
-    "she", "her", "hers",
-    "they", "their", "theirs", "them",
-    "we", "our", "ours", "us",
-    "you", "your", "yours",
-    "it", "its",
-    "i", "me", "my", "mine",
-    "this", "these", "those",
-    "there", "here",
-    "of", "to", "in", "on", "at", "for", "with", "from", "by",
-    "up", "down", "out", "off",
-    "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves",
-    "please",
-    "sorry",
-    "thanks", "thank", "thank you",
-    "bye", "goodbye",
-    "hello", "hi",
-    "nah", "nope",
-    "ha", "haha", "hahaha",
-    "yeah", "yep", "yup",
-    "ok", "okay", "alright", "all right",
-    "oh", "ooh", "ah", "uh", "um", "uhh", "umm", "hm", "hmm", "huh", "uh-huh",
-    "wow", "whoa", "oops",
-    "mm", "mmm", "mhm", "mm-hmm",
-    "er", "erm",
-    "hey",
-}
 LOW_VALUE_BASE_FORMS = DIRECT_NO_MATCH_BASEFORMS
 
 

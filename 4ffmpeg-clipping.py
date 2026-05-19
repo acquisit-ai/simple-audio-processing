@@ -80,6 +80,7 @@ def slice_transcript_for_clip(
     start_index: int,
     end_index: int,
     time_offset_ms: int = 0,
+    clip_metadata: dict | None = None,
 ) -> dict:
     ordered_sentences, sentence_position_map = build_sentence_lookup(transcript_data)
 
@@ -120,6 +121,10 @@ def slice_transcript_for_clip(
             len(sentence.get("tokens", []))
             for sentence in clip_sentences
         )
+
+    if clip_metadata is not None:
+        for key, value in clip_metadata.items():
+            clip_transcript[key] = copy.deepcopy(value)
 
     return clip_transcript
 
@@ -334,6 +339,7 @@ def clip_video_and_transcript(
             start_index=clip_plan["start_index"],
             end_index=clip_plan["end_index"],
             time_offset_ms=start_time_ms,
+            clip_metadata=clip_plan,
         )
         save_json(clip_transcript, output_transcript_path)
 
