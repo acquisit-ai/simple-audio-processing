@@ -45,25 +45,25 @@ DEFAULT_QUESTION_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_QUESTION_THINKING_LEVEL = "high"
 ALLOWED_GEMINI_THINKING_LEVELS = {"low", "medium", "high"}
 DEFAULT_SELECTION_TOP_K = 6
-DEFAULT_SELECTION_BATCH_SIZE = 12
+DEFAULT_SELECTION_BATCH_SIZE = 15
 DEFAULT_SELECTION_MAX_WORKERS = 4
 DEFAULT_CANDIDATE_SCORE_THRESHOLD = 6
 DEFAULT_CACHE_TTL_SECONDS = 30 * 60
 DEFAULT_VIDEO_MIME_TYPE = "video/mp4"
-CHECKPOINT_VERSION = 3
-DEFAULT_BATCH_SIZE = 12
+CHECKPOINT_VERSION = 4
+DEFAULT_BATCH_SIZE = 15
 SUPPORTED_QUESTION_TYPES = {"context_meaning_choice", "context_cloze_choice"}
 EXPECTED_OPTION_IDS = ["correct", "wrong_1", "wrong_2", "wrong_3"]
 CANDIDATE_SCORE_WEIGHTS = {
-    "visual_context": 0.10,
+    "visual_context": 0.15,
     "context_clarity": 0.35,
     "learning_value": 0.25,
-    "question_fit": 0.30,
+    "representative_salience": 0.25,
 }
 
 
 SELECTION_SYSTEM_PROMPT = """
-你是英语学习题目的上下文选择器。你的任务不是出题，也不是筛掉单词，而是为每个 coarse unit 在它出现过的句子中选择一个最适合后续学习和出题的 ref，并给出可用于脚本筛选的评分。
+你是英语学习题目的上下文选择器。你的任务不是出题，也不是筛掉单词，而是为每个 coarse unit 在它出现过的句子中选择一个最适合后续学习和出题的 ref，并给出可用于脚本筛选的评分。目标学习者是中文母语、高中及以上英语水平的学习者。
 
 输入说明：
 - FULL_VIDEO_TRANSCRIPT 是完整字幕；如果调用方提供了视频缓存，你还可以同时参考完整视频画面、声音、说话人语气和场景变化。
@@ -84,16 +84,16 @@ SELECTION_SYSTEM_PROMPT = """
 - 选择时以 transcript 里的候选句和时间为准；视频只用于判断画面、声音和上下文是否帮助理解，不要根据视频改动候选边界。
 
 评分规则：
-- scores 中四个字段都必须是 0 到 10 的整数，0 表示完全不适合，10 表示非常适合。
+- scores 中四个字段都必须是 0 到 10 的整数，0 表示完全不适合，10 表示非常适合。分数浮动幅度可以略大一点，以体现更大差异，但不要过度细分。
 - visual_context：视频画面、动作、表情、物件、声音或语气是否直接帮助理解目标词。纯对白且画面无帮助通常较低；画面能直接展示含义或情绪时较高。
 - context_clarity：当前句子及邻近上下文是否足以让学习者理解目标词在此处的意思。上下文越独立、指代越少、语义越明确，分数越高。
-- learning_value：该词或短语是否值得中文学习者学习。常见但有用的表达、地道搭配、语境化含义、可迁移用法分数更高；专名、一次性梗、无稳定学习价值的内容分数更低。
-- question_fit：该 ref 是否适合后续生成唯一正确答案的选择题。正确答案清楚、错误项容易设计且不会出现多个可接受答案时分数更高。
+- learning_value：该词或短语是否值得高中及以上中文学习者学习。常见但有用的表达、地道搭配、语境化含义、可迁移用法分数更高；专名、一次性梗、无稳定学习价值或者过于简单的内容分数更低。
+- representative_salience：综合评定该 ref 是否能代表该 coarse unit 的典型/重要用法，同时在目标词在当前句子里足够显著。目标词是句子学习焦点、用法清楚、适合作为代表用法时分数更高；顺带提到、背景噪音、寒暄、重复口头碎片、不典型或目标词不突出的出现分数更低。
 - reason 必须使用中文，简短说明为什么选择该句，以及必要时说明主要扣分点。
 """.strip()
 
 QUESTION_SYSTEM_PROMPT = """
-你是英语学习题目生成器。你的任务是根据输入的 candidates 生成适合中文学习者的视频上下文选择题；如果某个 candidate 不适合生成高质量题目，可以主动拒绝。
+你是英语学习题目生成器。你的任务是根据输入的 candidates 生成适合中文母语、高中及以上英语水平学习者的视频上下文选择题。如果某个 candidate 在上下文中不适合生成高质量题目，可以主动拒绝。题目难度应适合高中及以上学习者：选项不需要故意高级，但必须能考察真实语境理解，而不是只考孤立词典释义
 
 输出边界：
 - 当前 batch 中的每个 candidate 最多生成一道题；不要为同一个 candidate 同时生成 result 和 rejection。
@@ -125,7 +125,7 @@ QUESTION_SYSTEM_PROMPT = """
 主动拒绝标准：
 - 当前上下文不足以判断目标词含义。
 - 目标词在该句里主要是人名、地名、品牌名、影视角色名或其他专有名词。
-- 目标词只是语气词、填充词、无稳定学习价值的口头碎片。
+- 目标词只是语气词、填充词、无稳定学习价值的口头碎片。不要把有明确语境用法的中级词汇或词组归入这一类。
 - 无法设计三个在当前语境下明确错误且不误导的选项。
 - 挖空后会泄露答案，或不挖空就无法形成自然英文句子。
 
@@ -181,7 +181,7 @@ class AIContextSelectionScores(BaseModel):
     visual_context: int = Field(ge=0, le=10)
     context_clarity: int = Field(ge=0, le=10)
     learning_value: int = Field(ge=0, le=10)
-    question_fit: int = Field(ge=0, le=10)
+    representative_salience: int = Field(ge=0, le=10)
 
 
 class AIContextSelection(BaseModel):
@@ -233,7 +233,7 @@ class RefScores(BaseModel):
     visual_context: int
     context_clarity: int
     learning_value: int
-    question_fit: int
+    representative_salience: int
 
 
 class QuestionCandidatePayload(BaseModel):
@@ -646,7 +646,7 @@ def calculate_candidate_score(scores: RefScores | AIContextSelectionScores) -> f
         scores.visual_context * CANDIDATE_SCORE_WEIGHTS["visual_context"]
         + scores.context_clarity * CANDIDATE_SCORE_WEIGHTS["context_clarity"]
         + scores.learning_value * CANDIDATE_SCORE_WEIGHTS["learning_value"]
-        + scores.question_fit * CANDIDATE_SCORE_WEIGHTS["question_fit"],
+        + scores.representative_salience * CANDIDATE_SCORE_WEIGHTS["representative_salience"],
         2,
     )
 
@@ -656,7 +656,7 @@ def default_selection_scores() -> RefScores:
         visual_context=5,
         context_clarity=5,
         learning_value=5,
-        question_fit=5,
+        representative_salience=5,
     )
 
 
