@@ -40,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from direct_no_match_baseforms import DIRECT_NO_MATCH_BASEFORMS
 
 
-DEFAULT_BATCH_SIZE = 3
+DEFAULT_BATCH_SIZE = 4
 DEFAULT_VERTEX_LOCATION = "global"
 DEFAULT_STAGE_ONE_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_STAGE_ONE_THINKING_LEVEL = "high"

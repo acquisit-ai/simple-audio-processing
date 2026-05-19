@@ -56,8 +56,8 @@ SUPPORTED_QUESTION_TYPES = {"context_meaning_choice", "context_cloze_choice"}
 EXPECTED_OPTION_IDS = ["correct", "wrong_1", "wrong_2", "wrong_3"]
 CANDIDATE_SCORE_WEIGHTS = {
     "visual_context": 0.15,
-    "context_clarity": 0.35,
-    "learning_value": 0.25,
+    "context_clarity": 0.40,
+    "learning_value": 0.20,
     "representative_salience": 0.25,
 }
 

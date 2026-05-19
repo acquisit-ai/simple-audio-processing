@@ -22,7 +22,7 @@ from pathlib import Path
 
 DEFAULT_SOURCE_DIR = Path("resource/The Office BD/clips-transcripts")
 DEFAULT_TARGET_DIR = Path("resource/The Office BD/mapped")
-DEFAULT_MAX_WORKERS = 5
+DEFAULT_MAX_WORKERS = 10
 ROOT_DIR = Path(__file__).resolve().parent
 MAPPING_SCRIPT = ROOT_DIR / "5agent-mapping-gemini.py"
 
