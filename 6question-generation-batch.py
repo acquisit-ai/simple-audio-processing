@@ -23,7 +23,7 @@ from pathlib import Path
 DEFAULT_SOURCE_DIR = Path("resource/The Office BD/mapped")
 DEFAULT_TARGET_DIR = Path("resource/The Office BD/questions")
 DEFAULT_VIDEO_GCS_DIR = "gs://videos2077/test-video/clips/"
-DEFAULT_MAX_WORKERS = 4
+DEFAULT_MAX_WORKERS = 5
 DEFAULT_BATCH_SIZE = 12
 DEFAULT_QUESTION_TYPES = "context_meaning_choice,context_cloze_choice"
 DEFAULT_MODEL = "gemini-3.1-pro-preview"

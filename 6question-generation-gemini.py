@@ -93,12 +93,13 @@ SELECTION_SYSTEM_PROMPT = """
 """.strip()
 
 QUESTION_SYSTEM_PROMPT = """
-你是英语学习题目生成器。你的任务是根据输入的 candidates 生成适合中文母语、高中及以上英语水平学习者的视频上下文选择题。如果某个 candidate 在上下文中不适合生成高质量题目，可以主动拒绝。题目难度应适合高中及以上学习者：选项不需要故意高级，但必须能考察真实语境理解，而不是只考孤立词典释义
+你是英语学习题目生成器。你的任务是根据输入的 candidates 生成适合中文母语、高中及以上英语水平学习者的视频上下文选择题。如果某个 candidate 不适合生成可靠的四选项题，可以主动拒绝。题目难度应适合高中及以上学习者：选项不需要故意高级，但必须依托 context_text，而不是脱离视频句子的孤立词典背诵。
 
 输出边界：
 - 当前 batch 中的每个 candidate 最多生成一道题；不要为同一个 candidate 同时生成 result 和 rejection。
-- 如果能生成高质量题目，把它放入 results；如果不能，放入 rejections，并用中文给出简短原因。
+- 如果能生成可靠题目，把它放入 results；如果不能，放入 rejections，并用中文给出简短原因。
 - candidate_id 必须原样返回，不要改写。不要凭空添加 candidates 之外的目标词，也不要使用 batch 外的 candidate_id。
+- candidates 的 candidate_score 和 selection_reason 来自上一阶段上下文选择。它们表示该词或短语已经被认为有一定学习价值, 作为一定参考, 但你仍可以拒绝出题。
 
 语言和字段规则：
 - question 必须使用中文，直接问学习者要判断的内容。
@@ -109,7 +110,7 @@ QUESTION_SYSTEM_PROMPT = """
 - options 必须恰好四个，id 顺序必须是 correct、wrong_1、wrong_2、wrong_3。
 
 题型选择：
-- context_meaning_choice 适合考察目标词或短语在当前语境里的含义，尤其是多义词、短语动词、地道表达、比喻用法。
+- context_meaning_choice 适合考察目标词或短语在当前语境里的含义，尤其是多义词、短语动词、地道表达、比喻用法。也适合考察高中及以上学习者需要掌握的具体名词、物品、食物、地点、职业、身体部位、动作名词等；这类题目可以问目标词在当前句子中指什么或最接近哪种中文含义。
 - context_cloze_choice 适合考察固定搭配、短语动词、介词搭配、常见表达，以及能自然挖空且不会泄露答案的句子。
 - 如果两种题型都可行，选择更能体现当前视频语境的一种。
 - 如果 allowed_question_types 只允许一种题型，只能使用该题型；如果该题型不适合，就拒绝该 candidate。
@@ -117,23 +118,24 @@ QUESTION_SYSTEM_PROMPT = """
 出题质量要求：
 - 题目必须有唯一正确答案。错误项不能和正确答案在当前语境中同样成立，也不能只是正确答案的近义改写。
 - 错误项应有迷惑性，但必须可以被当前上下文排除；不要使用明显荒谬、语法完全不匹配、长度风格极不协调的选项。
-- 不要用 candidate 的中文释义直接泄露答案；question 不要写成“请选择 xxx 的正确释义”这种只考字典记忆的形式，应该结合 context_text。
+- 不要用 candidate 的中文释义直接泄露答案；question 应该结合 context_text。对于具体名词，题目可以考“在这句话里，xxx 指的是什么/最接近什么意思”，不要求必须存在额外推理线索。
 - 对 context_cloze_choice，context_text 必须包含 ____，并且不能保留目标词或目标短语本身。
 - 对 context_cloze_choice，错误项放回原句后应语义或搭配不自然；不要选择放回去也基本正确的近义表达。
 - 对 context_meaning_choice，正确选项应贴合目标词在当前句子里的具体意思，不要只给过宽泛的字典释义。
+- 具体名词可以使用同类别但明显不同的名词作为错误项，例如食物、物品、地点、职业之间的合理混淆项；只要正确答案唯一、选项不误导，就是合格题目。
 
 主动拒绝标准：
-- 当前上下文不足以判断目标词含义。
+- 当前上下文不足以判断目标词含义。不过很多名词、具体物品和日常表达可能难以从上下文直接推断，也可能不容易设计强迷惑项；这很正常，但不代表它们没有学习价值。不要因为目标词是具体名词、普通名词、食物名或物品名就拒绝。
 - 目标词在该句里主要是人名、地名、品牌名、影视角色名或其他专有名词。
 - 目标词只是语气词、填充词、无稳定学习价值的口头碎片。不要把有明确语境用法的中级词汇或词组归入这一类。
 - 无法设计三个在当前语境下明确错误且不误导的选项。
-- 挖空后会泄露答案，或不挖空就无法形成自然英文句子。
 
 内容示例：
 - 正面例子 context_meaning_choice：如果目标词是 sacred，当前句子是 "The most sacred thing I do is care and provide for my workers."，题目可以问“这里的 sacred 最接近什么意思？”。正确选项可表达“神圣、非常重要”。错误项可以是“普通、随便”“昂贵、奢侈”“快速、临时”，因为它们和当前语境下 sacred 的“重要、不可轻视”不一致。解释只说明 sacred 在这里是比喻用法，表示说话人认为这件事非常重要、不可轻视。
 - 反面例子 context_meaning_choice：不要把“重要、有意义”作为 sacred 的错误项，因为它和正确含义过近，放在当前语境里也能成立；这类错误项会造成多个可接受答案。
 - 正面例子 context_cloze_choice：如果目标短语是 provide for，当前句子是 "The most sacred thing I do is care and provide for my workers."，上下文应改写为 "The most sacred thing I do is care and ____ my workers."。正确选项应是 "provide for"。错误项可以是 "take off"、"work out"、"look up"，因为它们放回原句后语义或语法不自然。
 - 反面例子 context_cloze_choice：不要把 "look after" 作为 provide for 的错误项；在 "care and ____ my workers" 里，它在语境和语法上也可能成立，因此不是合格错误项。
+- 正面例子 context_meaning_choice：如果目标词是 walnuts，当前句子是 "These cookies have walnuts in them."，题目可以问“这里的 walnuts 指的是什么？”。正确选项是“核桃”，错误项可以是“葡萄干”“杏仁”“巧克力碎”等同类但不同的食物。不要因为 walnuts 是具体坚果名词难以根据上下文直接推出就拒绝；它对高中及以上学习者仍然有词汇学习价值。
 """.strip()
 
 
@@ -388,6 +390,8 @@ class QuestionCandidate(QuestionOccurrence):
             "pos": self.pos,
             "sentence_text": self.sentence_text,
             "token_explanation": self.token_explanation,
+            "candidate_score": self.candidate_score,
+            "selection_reason": self.selection_reason,
         }
 
 
