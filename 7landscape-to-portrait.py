@@ -9,12 +9,16 @@ from pathlib import Path
 from typing import Callable
 
 
-SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".m4v", ".webm"}
+DEFAULT_SOURCE_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-clips")
+DEFAULT_TARGET_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-portrait")
+SUPPORTED_VIDEO_SUFFIXES = {".mp4"}
 DEFAULT_OUTPUT_HEIGHT = 1280
-DEFAULT_VIDEO_BITRATE = "2500k"
-DEFAULT_MAXRATE = "3200k"
-DEFAULT_BUFSIZE = "5000k"
-DEFAULT_AUDIO_BITRATE = "128k"
+DEFAULT_VIDEO_BITRATE = "1500k"
+DEFAULT_MAXRATE = "2200k"
+DEFAULT_BUFSIZE = "4000k"
+DEFAULT_AUDIO_BITRATE = "256k"
+DEFAULT_AUDIO_SAMPLE_RATE = 48000
+DEFAULT_AUDIO_CHANNELS = 2
 DEFAULT_GOP_SIZE = 48
 
 
@@ -29,27 +33,29 @@ def build_videotoolbox_encoder_args(
         "-maxrate", maxrate,
         "-bufsize", bufsize,
         "-g", str(gop_size),
-        "-tag:v", "avc1",
+        "-tag:v", "hvc1",
+        "-spatial_aq", "1",
     ]
 
 
-def build_libx264_encoder_args(
+def build_libx265_encoder_args(
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE,
     maxrate: str = DEFAULT_MAXRATE,
     bufsize: str = DEFAULT_BUFSIZE,
     gop_size: int = DEFAULT_GOP_SIZE,
 ) -> list[str]:
     return [
-        "-crf", "23",
-        "-preset", "veryfast",
+        "-b:v", video_bitrate,
+        "-preset", "medium",
         "-maxrate", maxrate,
         "-bufsize", bufsize,
         "-g", str(gop_size),
+        "-tag:v", "hvc1",
     ]
 
 
 VIDEOTOOLBOX_ENCODER_ARGS = build_videotoolbox_encoder_args()
-LIBX264_ENCODER_ARGS = build_libx264_encoder_args()
-AUDIO_ENCODER_ARGS = ["-c:a", "aac", "-b:a", DEFAULT_AUDIO_BITRATE]
+LIBX265_ENCODER_ARGS = build_libx265_encoder_args()
 
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -112,8 +118,8 @@ def choose_video_encoder(
     encoders = get_ffmpeg_encoders()
 
     # macOS: VideoToolbox
-    if system == "darwin" and "h264_videotoolbox" in encoders:
-        return "h264_videotoolbox", build_videotoolbox_encoder_args(
+    if system == "darwin" and "hevc_videotoolbox" in encoders:
+        return "hevc_videotoolbox", build_videotoolbox_encoder_args(
             video_bitrate=video_bitrate,
             maxrate=maxrate,
             bufsize=bufsize,
@@ -121,11 +127,18 @@ def choose_video_encoder(
         )
 
     # Windows: NVIDIA NVENC if available
-    if system == "windows" and "h264_nvenc" in encoders:
-        return "h264_nvenc", ["-cq", "23", "-preset", "p5"]
+    if system == "windows" and "hevc_nvenc" in encoders:
+        return "hevc_nvenc", [
+            "-b:v", video_bitrate,
+            "-maxrate", maxrate,
+            "-bufsize", bufsize,
+            "-g", str(gop_size),
+            "-tag:v", "hvc1",
+        ]
 
     # fallback
-    return "libx264", build_libx264_encoder_args(
+    return "libx265", build_libx265_encoder_args(
+        video_bitrate=video_bitrate,
         maxrate=maxrate,
         bufsize=bufsize,
         gop_size=gop_size,
@@ -147,12 +160,12 @@ def build_filter(output_w: int, output_h: int, blur_sigma: int = 35) -> str:
     return (
         f"[0:v]split=2[bgsrc][fgsrc];"
         f"[bgsrc]"
-        f"scale={output_w}:{output_h}:force_original_aspect_ratio=increase,"
+        f"scale={output_w}:{output_h}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={output_w}:{output_h},"
         f"gblur=sigma={blur_sigma},"
         f"setsar=1[bg];"
         f"[fgsrc]"
-        f"scale={output_w}:{output_h}:force_original_aspect_ratio=decrease,"
+        f"scale={output_w}:{output_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,"
         f"format=yuv420p[v]"
@@ -194,6 +207,8 @@ def convert_landscape_to_vertical(
     maxrate: str = DEFAULT_MAXRATE,
     bufsize: str = DEFAULT_BUFSIZE,
     audio_bitrate: str = DEFAULT_AUDIO_BITRATE,
+    audio_sample_rate: int = DEFAULT_AUDIO_SAMPLE_RATE,
+    audio_channels: int = DEFAULT_AUDIO_CHANNELS,
     gop_size: int = DEFAULT_GOP_SIZE,
 ) -> None:
     ensure_ffmpeg_exists()
@@ -221,7 +236,12 @@ def convert_landscape_to_vertical(
         gop_size=gop_size,
     )
     filter_complex = build_filter(out_w, out_h)
-    audio_encoder_args = ["-c:a", "aac", "-b:a", audio_bitrate]
+    audio_encoder_args = [
+        "-c:a", "aac",
+        "-b:a", audio_bitrate,
+        "-ar", str(audio_sample_rate),
+        "-ac", str(audio_channels),
+    ]
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -250,8 +270,8 @@ def convert_landscape_to_vertical(
         run_cmd(cmd)
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
-        # GPU 编码失败时自动回退到 libx264
-        if encoder != "libx264":
+        # GPU 编码失败时自动回退到 libx265
+        if encoder != "libx265":
             fallback_cmd = [
                 "ffmpeg",
                 "-y",
@@ -265,8 +285,9 @@ def convert_landscape_to_vertical(
                 "-map",
                 "0:a?",
                 "-c:v",
-                "libx264",
-                *build_libx264_encoder_args(
+                "libx265",
+                *build_libx265_encoder_args(
+                    video_bitrate=video_bitrate,
                     maxrate=maxrate,
                     bufsize=bufsize,
                     gop_size=gop_size,
@@ -289,8 +310,10 @@ def run_batch_convert(
     maxrate: str = DEFAULT_MAXRATE,
     bufsize: str = DEFAULT_BUFSIZE,
     audio_bitrate: str = DEFAULT_AUDIO_BITRATE,
+    audio_sample_rate: int = DEFAULT_AUDIO_SAMPLE_RATE,
+    audio_channels: int = DEFAULT_AUDIO_CHANNELS,
     gop_size: int = DEFAULT_GOP_SIZE,
-    converter: Callable[[str, str, int, str, str, str, str, int], None] = convert_landscape_to_vertical,
+    converter: Callable[[str, str, int, str, str, str, str, int, int, int], None] = convert_landscape_to_vertical,
 ) -> dict[str, int]:
     source_files = collect_supported_video_files(source_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -331,6 +354,8 @@ def run_batch_convert(
                 maxrate,
                 bufsize,
                 audio_bitrate,
+                audio_sample_rate,
+                audio_channels,
                 gop_size,
             )
             existing_names.add(source_path.name)
@@ -358,20 +383,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        required=True,
-        help="源视频目录，只读取当前目录下的支持视频文件。",
+        default=DEFAULT_SOURCE_DIR,
+        help="源视频目录，只读取当前目录下的 MP4 文件，默认 /Volumes/Dingzhen/STT/The Office BD-clips。",
     )
     parser.add_argument(
         "--target-dir",
         type=Path,
-        required=True,
-        help="目标目录；若已存在同名视频则跳过。",
+        default=DEFAULT_TARGET_DIR,
+        help="目标目录；若已存在同名视频则跳过，默认 /Volumes/Dingzhen/STT/The Office BD-portrait。",
     )
     parser.add_argument("--height", type=int, default=DEFAULT_OUTPUT_HEIGHT, help="输出竖屏高度，默认 1280。")
-    parser.add_argument("--video-bitrate", default=DEFAULT_VIDEO_BITRATE, help="VideoToolbox 目标视频码率，默认 2500k。")
-    parser.add_argument("--maxrate", default=DEFAULT_MAXRATE, help="视频码率上限，默认 3200k。")
-    parser.add_argument("--bufsize", default=DEFAULT_BUFSIZE, help="码率控制 buffer size，默认 5000k。")
-    parser.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC 音频码率，默认 128k。")
+    parser.add_argument("--video-bitrate", default=DEFAULT_VIDEO_BITRATE, help="VideoToolbox HEVC 目标视频码率，默认 1500k。")
+    parser.add_argument("--maxrate", default=DEFAULT_MAXRATE, help="视频码率上限，默认 2200k。")
+    parser.add_argument("--bufsize", default=DEFAULT_BUFSIZE, help="码率控制 buffer size，默认 4000k。")
+    parser.add_argument("--audio-bitrate", default=DEFAULT_AUDIO_BITRATE, help="AAC 音频码率，默认 256k。")
+    parser.add_argument("--audio-sample-rate", type=int, default=DEFAULT_AUDIO_SAMPLE_RATE, help="音频采样率，默认 48000。")
+    parser.add_argument("--audio-channels", type=int, default=DEFAULT_AUDIO_CHANNELS, help="音频声道数，默认 2。")
     parser.add_argument("--gop-size", type=int, default=DEFAULT_GOP_SIZE, help="关键帧间隔，默认 48。")
     return parser.parse_args()
 
@@ -386,6 +413,8 @@ if __name__ == "__main__":
         maxrate=args.maxrate,
         bufsize=args.bufsize,
         audio_bitrate=args.audio_bitrate,
+        audio_sample_rate=args.audio_sample_rate,
+        audio_channels=args.audio_channels,
         gop_size=args.gop_size,
     )
     raise SystemExit(1 if summary["failed"] > 0 else 0)

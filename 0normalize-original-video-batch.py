@@ -75,6 +75,9 @@ def run_single_normalize_job(
     video_bitrate: str,
     maxrate: str,
     bufsize: str,
+    audio_bitrate: str,
+    audio_sample_rate: int,
+    audio_channels: int,
     gop_size: int,
 ) -> dict:
     if not overwrite and is_valid_existing_video(target_path):
@@ -95,6 +98,9 @@ def run_single_normalize_job(
             video_bitrate=video_bitrate,
             maxrate=maxrate,
             bufsize=bufsize,
+            audio_bitrate=audio_bitrate,
+            audio_sample_rate=audio_sample_rate,
+            audio_channels=audio_channels,
             gop_size=gop_size,
         )
     except Exception as exc:
@@ -120,9 +126,12 @@ def run_batch_normalize(
     max_workers: int = DEFAULT_MAX_WORKERS,
     overwrite: bool = False,
     output_height: int = 720,
-    video_bitrate: str = "1700k",
-    maxrate: str = "2500k",
-    bufsize: str = "4500k",
+    video_bitrate: str = "1500k",
+    maxrate: str = "2200k",
+    bufsize: str = "4000k",
+    audio_bitrate: str = "256k",
+    audio_sample_rate: int = 48000,
+    audio_channels: int = 2,
     gop_size: int = 48,
 ) -> int:
     if max_workers < 1:
@@ -163,6 +172,9 @@ def run_batch_normalize(
                 video_bitrate=video_bitrate,
                 maxrate=maxrate,
                 bufsize=bufsize,
+                audio_bitrate=audio_bitrate,
+                audio_sample_rate=audio_sample_rate,
+                audio_channels=audio_channels,
                 gop_size=gop_size,
             )
             future_to_source[future] = source_path
@@ -213,15 +225,18 @@ def run_batch_normalize(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="批量压缩标准化原始视频为 720p HEVC MP4，并保留原始音频流。")
+    parser = argparse.ArgumentParser(description="批量压缩标准化原始视频为 720p HEVC + AAC MP4。")
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR, help="源视频目录，默认 /Volumes/Dingzhen/STT/The Office BD-original")
     parser.add_argument("--target-dir", type=Path, default=DEFAULT_TARGET_DIR, help="目标目录，默认 /Volumes/Dingzhen/STT/The Office BD-normalized")
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS, help="视频级并发数，默认 3")
     parser.add_argument("--overwrite", action="store_true", help="覆盖已存在的标准化视频")
     parser.add_argument("--height", type=int, default=720, help="输出高度，默认 720。")
-    parser.add_argument("--video-bitrate", default="1700k", help="VideoToolbox 目标视频码率，默认 1700k。")
-    parser.add_argument("--maxrate", default="2500k", help="视频码率上限，默认 2500k。")
-    parser.add_argument("--bufsize", default="4500k", help="码率控制 buffer size，默认 4500k。")
+    parser.add_argument("--video-bitrate", default="1500k", help="VideoToolbox 目标视频码率，默认 1500k。")
+    parser.add_argument("--maxrate", default="2200k", help="视频码率上限，默认 2200k。")
+    parser.add_argument("--bufsize", default="4000k", help="码率控制 buffer size，默认 4000k。")
+    parser.add_argument("--audio-bitrate", default="256k", help="AAC 音频码率，默认 256k。")
+    parser.add_argument("--audio-sample-rate", type=int, default=48000, help="音频采样率，默认 48000。")
+    parser.add_argument("--audio-channels", type=int, default=2, help="音频声道数，默认 2。")
     parser.add_argument("--gop-size", type=int, default=48, help="关键帧间隔，默认 48。")
     return parser.parse_args()
 
@@ -237,6 +252,9 @@ if __name__ == "__main__":
         video_bitrate=args.video_bitrate,
         maxrate=args.maxrate,
         bufsize=args.bufsize,
+        audio_bitrate=args.audio_bitrate,
+        audio_sample_rate=args.audio_sample_rate,
+        audio_channels=args.audio_channels,
         gop_size=args.gop_size,
     )
     raise SystemExit(exit_code)
