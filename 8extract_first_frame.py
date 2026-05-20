@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -10,6 +11,7 @@ from typing import Callable, Optional
 SUPPORTED_VIDEO_SUFFIXES = {".mp4"}
 DEFAULT_SOURCE_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-clips")
 DEFAULT_TARGET_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-cover")
+DEFAULT_MAX_WORKERS = 3
 
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -129,8 +131,12 @@ def extract_first_frame_to_webp(input_path: str, output_path: str) -> None:
 def run_batch_extract(
     source_dir: Path,
     target_dir: Path,
+    max_workers: int = DEFAULT_MAX_WORKERS,
     extractor: Callable[[str, str], None] = extract_first_frame_to_webp,
 ) -> dict[str, int]:
+    if max_workers < 1:
+        raise ValueError("max_workers 必须大于等于 1")
+
     source_files = collect_supported_video_files(source_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     existing_names = collect_existing_webp_names(target_dir)
@@ -141,11 +147,12 @@ def run_batch_extract(
 
     print(f"源目录: {source_dir}")
     print(f"目标目录: {target_dir}")
-    print(f"源视频数: {len(source_files)}")
+    print(f"源 MP4 数: {len(source_files)}")
     print(f"目标已存在 webp 数: {len(existing_names)}")
+    print(f"并发数: {max_workers}")
 
     if not source_files:
-        print("没有找到可处理的视频文件。")
+        print("没有找到可处理的 MP4 文件。")
         return {
             "total_source_files": 0,
             "processed": 0,
@@ -153,6 +160,7 @@ def run_batch_extract(
             "failed": 0,
         }
 
+    jobs = []
     for index, source_path in enumerate(source_files, start=1):
         target_name = f"{source_path.stem}.webp"
         target_path = target_dir / target_name
@@ -161,18 +169,32 @@ def run_batch_extract(
             print(f"[{index}/{len(source_files)}] 跳过: {source_path.name}")
             continue
 
-        try:
-            print(f"[{index}/{len(source_files)}] 开始处理: {source_path.name}")
-            extractor(str(source_path), str(target_path))
-            existing_names.add(target_name)
-            processed += 1
-            print(f"[{index}/{len(source_files)}] 处理完成: {source_path.name}")
-        except Exception as exc:
-            failed += 1
-            print(
-                f"[{index}/{len(source_files)}] 处理失败: {source_path.name} | "
-                f"{type(exc).__name__}: {exc}"
+        jobs.append((index, source_path, target_name, target_path))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_job = {
+            executor.submit(extractor, str(source_path), str(target_path)): (
+                index,
+                source_path,
+                target_name,
+                target_path,
             )
+            for index, source_path, target_name, target_path in jobs
+        }
+
+        for future in as_completed(future_to_job):
+            index, source_path, target_name, target_path = future_to_job[future]
+            try:
+                future.result()
+                existing_names.add(target_name)
+                processed += 1
+                print(f"[{index}/{len(source_files)}] 处理完成: {source_path.name}")
+            except Exception as exc:
+                failed += 1
+                print(
+                    f"[{index}/{len(source_files)}] 处理失败: {source_path.name} | "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
     print("\n批处理完成")
     print(f"处理成功: {processed}")
@@ -201,10 +223,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TARGET_DIR,
         help="目标目录；若已存在同名 .webp 则跳过，默认 /Volumes/Dingzhen/STT/The Office BD-cover。",
     )
+    parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS, help="并发处理数，默认 3。")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    summary = run_batch_extract(args.source_dir, args.target_dir)
+    summary = run_batch_extract(args.source_dir, args.target_dir, max_workers=args.max_workers)
     raise SystemExit(1 if summary["failed"] > 0 else 0)

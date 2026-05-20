@@ -5,12 +5,14 @@ import platform
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
 
 DEFAULT_SOURCE_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-clips")
 DEFAULT_TARGET_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-portrait")
+DEFAULT_MAX_WORKERS = 3
 SUPPORTED_VIDEO_SUFFIXES = {".mp4"}
 DEFAULT_OUTPUT_HEIGHT = 1280
 DEFAULT_VIDEO_BITRATE = "1500k"
@@ -305,6 +307,7 @@ def convert_landscape_to_vertical(
 def run_batch_convert(
     source_dir: Path,
     target_dir: Path,
+    max_workers: int = DEFAULT_MAX_WORKERS,
     output_height: int = DEFAULT_OUTPUT_HEIGHT,
     video_bitrate: str = DEFAULT_VIDEO_BITRATE,
     maxrate: str = DEFAULT_MAXRATE,
@@ -315,6 +318,9 @@ def run_batch_convert(
     gop_size: int = DEFAULT_GOP_SIZE,
     converter: Callable[[str, str, int, str, str, str, str, int, int, int], None] = convert_landscape_to_vertical,
 ) -> dict[str, int]:
+    if max_workers < 1:
+        raise ValueError("max_workers 必须大于等于 1")
+
     source_files = collect_supported_video_files(source_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     existing_names = collect_existing_video_names(target_dir)
@@ -325,11 +331,12 @@ def run_batch_convert(
 
     print(f"源目录: {source_dir}")
     print(f"目标目录: {target_dir}")
-    print(f"源视频数: {len(source_files)}")
-    print(f"目标已存在视频数: {len(existing_names)}")
+    print(f"源 MP4 数: {len(source_files)}")
+    print(f"目标已存在 MP4 数: {len(existing_names)}")
+    print(f"并发数: {max_workers}")
 
     if not source_files:
-        print("没有找到可处理的视频文件。")
+        print("没有找到可处理的 MP4 文件。")
         return {
             "total_source_files": 0,
             "processed": 0,
@@ -337,6 +344,7 @@ def run_batch_convert(
             "failed": 0,
         }
 
+    jobs = []
     for index, source_path in enumerate(source_files, start=1):
         target_path = target_dir / source_path.name
         if source_path.name in existing_names:
@@ -344,9 +352,12 @@ def run_batch_convert(
             print(f"[{index}/{len(source_files)}] 跳过: {source_path.name}")
             continue
 
-        try:
-            print(f"[{index}/{len(source_files)}] 开始处理: {source_path.name}")
-            converter(
+        jobs.append((index, source_path, target_path))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_job = {
+            executor.submit(
+                converter,
                 str(source_path),
                 str(target_path),
                 output_height,
@@ -357,13 +368,20 @@ def run_batch_convert(
                 audio_sample_rate,
                 audio_channels,
                 gop_size,
-            )
-            existing_names.add(source_path.name)
-            processed += 1
-            print(f"[{index}/{len(source_files)}] 处理完成: {source_path.name}")
-        except Exception as exc:
-            failed += 1
-            print(f"[{index}/{len(source_files)}] 处理失败: {source_path.name} | {type(exc).__name__}: {exc}")
+            ): (index, source_path, target_path)
+            for index, source_path, target_path in jobs
+        }
+
+        for future in as_completed(future_to_job):
+            index, source_path, target_path = future_to_job[future]
+            try:
+                future.result()
+                existing_names.add(source_path.name)
+                processed += 1
+                print(f"[{index}/{len(source_files)}] 处理完成: {source_path.name}")
+            except Exception as exc:
+                failed += 1
+                print(f"[{index}/{len(source_files)}] 处理失败: {source_path.name} | {type(exc).__name__}: {exc}")
 
     print("\n批处理完成")
     print(f"处理成功: {processed}")
@@ -392,6 +410,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TARGET_DIR,
         help="目标目录；若已存在同名视频则跳过，默认 /Volumes/Dingzhen/STT/The Office BD-portrait。",
     )
+    parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS, help="并发处理数，默认 3。")
     parser.add_argument("--height", type=int, default=DEFAULT_OUTPUT_HEIGHT, help="输出竖屏高度，默认 1280。")
     parser.add_argument("--video-bitrate", default=DEFAULT_VIDEO_BITRATE, help="VideoToolbox HEVC 目标视频码率，默认 1500k。")
     parser.add_argument("--maxrate", default=DEFAULT_MAXRATE, help="视频码率上限，默认 2200k。")
@@ -408,6 +427,7 @@ if __name__ == "__main__":
     summary = run_batch_convert(
         args.source_dir,
         args.target_dir,
+        max_workers=args.max_workers,
         output_height=args.height,
         video_bitrate=args.video_bitrate,
         maxrate=args.maxrate,
