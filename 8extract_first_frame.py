@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
-SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".m4v", ".webm"}
+SUPPORTED_VIDEO_SUFFIXES = {".mp4"}
+DEFAULT_SOURCE_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-clips")
+DEFAULT_TARGET_DIR = Path("/Volumes/Dingzhen/STT/The Office BD-cover")
 
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -190,14 +192,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        required=True,
-        help="源视频目录，只读取当前目录下的支持视频文件。",
+        default=DEFAULT_SOURCE_DIR,
+        help="源视频目录，只读取当前目录下的 MP4 文件，默认 /Volumes/Dingzhen/STT/The Office BD-clips。",
     )
     parser.add_argument(
         "--target-dir",
         type=Path,
-        required=True,
-        help="目标目录；若已存在同名 .webp 则跳过。",
+        default=DEFAULT_TARGET_DIR,
+        help="目标目录；若已存在同名 .webp 则跳过，默认 /Volumes/Dingzhen/STT/The Office BD-cover。",
     )
     return parser.parse_args()
 
